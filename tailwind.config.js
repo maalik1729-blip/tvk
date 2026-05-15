@@ -1,0 +1,75 @@
+/** @type {import('tailwindcss').Config} */
+export default {
+  content: [
+    "./index.html",
+    "./src/**/*.{js,ts,jsx,tsx}",
+  ],
+  safelist: [
+    'bg-tvk-blue', 'bg-tvk-green', 'bg-saffron',
+    'text-tvk-blue', 'text-tvk-green', 'text-saffron',
+    'border-tvk-blue/10', 'border-tvk-green/10', 'border-saffron/10',
+    'bg-tvk-blue/5', 'bg-tvk-green/5', 'bg-saffron/5',
+    'hover:border-saffron', 'hover:bg-saffron/5', 'ring-saffron/30', 'ring-offset-tvk-blue',
+  ],
+  theme: {
+    extend: {
+      colors: {
+        navy: { DEFAULT: '#1a3a6b', dark: '#0d2347', mid: '#1e4a85', light: '#e8edf5' },
+        saffron: { DEFAULT: '#f26522', light: '#fff3ec' },
+        tvk: {
+          red: '#C8102E',
+          'red-dark': '#8B0000',
+          'red-deep': '#5A0000',
+          yellow: '#FFCC00',
+          'yellow-bright': '#FFD60A',
+          gold: '#FFD700',
+          black: '#0A0A0A',
+          cream: '#FFF8E7',
+          green: '#138808',
+          'green-bright': '#22C55E',
+          'green-neon': '#00E676',
+          blue: '#0057a8',
+        },
+      },
+      backgroundImage: {
+        'tvk-gradient': 'linear-gradient(135deg, #8B0000 0%, #C8102E 50%, #5A0000 100%)',
+        'tvk-radial': 'radial-gradient(ellipse at top, #C8102E 0%, #8B0000 50%, #0A0A0A 100%)',
+        'tvk-flame': 'linear-gradient(180deg, #FFCC00 0%, #FF8C00 50%, #C8102E 100%)',
+      },
+      fontFamily: {
+        sans: [
+          'Inter',
+          '"Noto Sans Tamil"',
+          'Poppins',
+          'Noto Sans',
+          '-apple-system',
+          'BlinkMacSystemFont',
+          '"Segoe UI"',
+          'Roboto',
+          '"Helvetica Neue"',
+          'Arial',
+          'sans-serif',
+          '"Apple Color Emoji"',
+          '"Segoe UI Emoji"',
+          '"Segoe UI Symbol"',
+        ],
+        display: [
+          'Poppins',
+          'Inter',
+          '"Noto Sans Tamil"',
+          'sans-serif',
+        ],
+        tamil: ['"Noto Sans Tamil"', 'Inter', 'sans-serif'],
+      },
+      letterSpacing: {
+        tighter: '-0.05em',
+        tight: '-0.025em',
+        normal: '0',
+        wide: '0.025em',
+        wider: '0.05em',
+        widest: '0.1em',
+      },
+    },
+  },
+  plugins: [],
+}
