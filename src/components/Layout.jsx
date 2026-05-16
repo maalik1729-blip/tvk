@@ -2,20 +2,23 @@ import { Outlet, useLocation } from 'react-router-dom'
 import { useEffect } from 'react'
 import Topbar from './Topbar'
 import Footer from './Footer'
+import BottomTabBar from './BottomTabBar'
 import SmoothScroll from './SmoothScroll'
 import ScrollProgress from './ScrollProgress'
-import HelpFab from './HelpFab'
 
 /**
- * App shell. Hides the topbar/footer on the dedicated auth screens — those
- * pages are full-bleed centred panels that look better without the rest of
- * the chrome competing for attention.
+ * App shell.
+ * - Auth screens (/login, /register) render full-bleed without chrome.
+ * - All other routes get Topbar + content + Footer + BottomTabBar (mobile only).
+ *
+ * Topbar is sticky (h-14 mobile / h-16 desktop). main has matching top padding
+ * so anchored content doesn't sit under the bar. Bottom padding clears the
+ * mobile tab bar so the last row of any list is reachable.
  */
 export default function Layout() {
   const { pathname } = useLocation()
   const minimal = pathname === '/login' || pathname === '/register'
 
-  // Scroll to top on route change (works with Lenis too)
   useEffect(() => {
     if (window.__lenis) {
       window.__lenis.scrollTo(0, { immediate: true })
@@ -27,7 +30,7 @@ export default function Layout() {
   if (minimal) {
     return (
       <SmoothScroll>
-        <div className="min-h-screen bg-white">
+        <div className="min-h-screen bg-surface">
           <Outlet />
         </div>
       </SmoothScroll>
@@ -37,14 +40,15 @@ export default function Layout() {
   return (
     <SmoothScroll>
       <ScrollProgress />
-      <div className="min-h-screen flex flex-col bg-white">
+      <div className="min-h-screen flex flex-col bg-surface">
         <Topbar />
-        <main className="flex-1 pt-16 sm:pt-[68px]">
+        <main className="flex-1 pb-[68px] lg:pb-0">
+          {/* Topbar is `sticky`, no top padding needed on main */}
           <Outlet />
         </main>
         <Footer />
+        <BottomTabBar />
       </div>
-      <HelpFab />
     </SmoothScroll>
   )
 }

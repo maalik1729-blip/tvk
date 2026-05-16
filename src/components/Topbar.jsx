@@ -1,52 +1,58 @@
 import { useState, useRef, useEffect } from 'react'
 import { Link, NavLink, useNavigate, useLocation } from 'react-router-dom'
 import {
-  Menu, X, LogOut, User as UserIcon, FileText, Eye, Search, Home, ChevronDown, Phone,
+  LogOut, User as UserIcon, ChevronDown, Search, Eye,
 } from 'lucide-react'
 import { useAuth } from '../lib/auth'
+import { cn } from './ui/cn'
+import Button from './ui/Button'
 
 /**
- * Sticky glassmorphism TVK navbar.
- * Goes opaque after the user scrolls past 8px so the page hero can breathe
- * while keeping the bar legible everywhere else.
+ * Flat brand bar.
+ * Spec: outputs/04 → Header Changes.
+ *
+ * Always solid bg-surface, hairline bottom border, single height that does
+ * not transition on scroll. Nav links live here on lg+ only; on smaller
+ * viewports the bottom tab bar takes over.
  */
+const NAV_AUTH = [
+  { to: '/grievance',     label: 'File'        },
+  { to: '/track',         label: 'Track'       },
+  { to: '/my-grievances', label: 'My Requests' },
+]
+
 export default function Topbar() {
   const { user, logout } = useAuth()
   const navigate = useNavigate()
   const location = useLocation()
-  const isHome = location.pathname === '/'
-  const [mobileOpen, setMobileOpen] = useState(false)
   const [menuOpen, setMenuOpen] = useState(false)
-  const [scrolled, setScrolled] = useState(false)
   const menuRef = useRef(null)
+  const triggerRef = useRef(null)
 
+  // Close menu on outside click or Escape; return focus to trigger.
   useEffect(() => {
-    const onScroll = () => setScrolled(window.scrollY > 8)
-    onScroll()
-    window.addEventListener('scroll', onScroll, { passive: true })
-    return () => window.removeEventListener('scroll', onScroll)
-  }, [])
-
-  useEffect(() => {
+    if (!menuOpen) return
     function onDocClick(e) {
-      if (menuRef.current && !menuRef.current.contains(e.target)) setMenuOpen(false)
+      if (menuRef.current && !menuRef.current.contains(e.target)) {
+        setMenuOpen(false)
+      }
+    }
+    function onKey(e) {
+      if (e.key === 'Escape') {
+        setMenuOpen(false)
+        triggerRef.current?.focus()
+      }
     }
     document.addEventListener('mousedown', onDocClick)
-    return () => document.removeEventListener('mousedown', onDocClick)
-  }, [])
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('mousedown', onDocClick)
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [menuOpen])
 
-  const allItems = user
-    ? [
-        { to: '/',              label: 'Home',           Icon: Home },
-        { to: '/grievance',     label: 'File Grievance', Icon: FileText },
-        { to: '/my-grievances', label: 'My Requests',    Icon: Eye },
-        { to: '/track',         label: 'Track',          Icon: Search },
-      ]
-    : [
-        { to: '/',         label: 'Home',  Icon: Home },
-      ]
-  // Hide "Home" entry when already on the landing page
-  const navItems = isHome ? allItems.filter((i) => i.to !== '/') : allItems
+  // Close menu on route change.
+  useEffect(() => { setMenuOpen(false) }, [location.pathname])
 
   const initial = (user?.name || user?.phone || 'U').charAt(0).toUpperCase()
 
@@ -57,196 +63,151 @@ export default function Topbar() {
   }
 
   return (
-    <header className={`tvk-nav fixed top-0 left-0 right-0 z-50 transition-all duration-300 ${scrolled ? 'scrolled' : ''}`}>
-      <div className="max-w-[1400px] mx-auto px-3 sm:px-5 md:px-8 h-16 sm:h-[68px] flex items-center justify-between gap-3 sm:gap-4">
+    <header className="sticky top-0 left-0 right-0 z-50 h-14 lg:h-16 bg-surface border-b border-hairline">
+      <div className="max-w-[1200px] mx-auto h-full px-4 lg:px-8 flex items-center gap-4">
 
-        {/* Brand */}
-        <Link to="/" className="flex items-center gap-3 group flex-shrink-0">
-          <div
-            className="relative w-10 h-10 rounded-xl flex items-center justify-center shadow-lg shadow-tvk-red/30 group-hover:scale-105 transition-transform"
-            style={{ background: 'linear-gradient(135deg, #C8102E 0%, #8B0000 100%)' }}
-          >
-            <img
-              src="/9a355bb7-ad98-488e-8575-f587165170ac.png"
-              alt="TVK Flag"
-              className="w-7 h-7 object-contain rounded-sm shadow-inner"
-            />
-            <span
-              className="absolute -bottom-0.5 left-1/2 -translate-x-1/2 w-7 h-1 rounded-full"
-              style={{ background: 'linear-gradient(90deg, #FFD60A 0%, #FF8C00 100%)' }}
-            />
-          </div>
-          <div className="hidden sm:block leading-tight">
-            <div className="font-extrabold text-tvk-black text-[15px] tracking-tight">Mylapore</div>
-            <div className="text-[10px] text-tvk-red uppercase tracking-[0.18em] font-bold mt-0.5">
-              TVK • Grievance Portal
-            </div>
-          </div>
+        {/* Brand lockup — logo + wordmark + sub-line */}
+        <Link
+          to="/"
+          className="flex items-center gap-2.5 shrink-0 group rounded-md px-1 -mx-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-red focus-visible:ring-offset-2"
+        >
+          <img
+            src="/f1c0ef41-c286-4bb3-807b-a2c94904e4b4.png"
+            alt=""
+            aria-hidden="true"
+            width="32"
+            height="32"
+            className="w-8 h-8 rounded-md object-cover shadow-e1 shrink-0 ring-1 ring-hairline"
+          />
+          <span className="hidden sm:flex flex-col leading-tight">
+            <span className="text-[15px] font-semibold text-ink-900 tracking-tight">Mylapore</span>
+            <span className="text-[11px] text-ink-500 font-medium tracking-wide">Grievance Portal</span>
+          </span>
         </Link>
 
-        {/* Centred desktop nav */}
-        <nav className="hidden md:flex items-center gap-1 flex-1 justify-center">
-          {navItems.map(({ to, label, Icon }) => (
-            <NavLink
-              key={to}
-              to={to}
-              end={to === '/'}
-              className={({ isActive }) => `tvk-nav-link ripple ${isActive ? 'active' : ''}`}
-            >
-              <Icon className="w-4 h-4" strokeWidth={2.2} />
-              <span>{label}</span>
-            </NavLink>
-          ))}
-        </nav>
+        {/* Inline nav — lg+ only */}
+        {user && (
+          <nav className="hidden lg:flex items-center gap-1 ml-4" aria-label="Primary">
+            {NAV_AUTH.map(({ to, label }) => (
+              <NavLink
+                key={to}
+                to={to}
+                className={({ isActive }) =>
+                  cn(
+                    'relative px-3 py-2 rounded-md text-[14px] font-medium transition-colors',
+                    'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-red focus-visible:ring-offset-2',
+                    isActive
+                      ? 'text-ink-900'
+                      : 'text-ink-700 hover:bg-surface-2 hover:text-ink-900',
+                  )
+                }
+              >
+                {({ isActive }) => (
+                  <>
+                    <span>{label}</span>
+                    {isActive && (
+                      <span
+                        aria-hidden="true"
+                        className="absolute left-3 right-3 -bottom-[1px] h-[2px] bg-brand-red rounded-full"
+                      />
+                    )}
+                  </>
+                )}
+              </NavLink>
+            ))}
+          </nav>
+        )}
 
-        {/* Auth cluster */}
-        <div className="flex items-center gap-2 flex-shrink-0">
+        {/* Right cluster */}
+        <div className="ml-auto flex items-center gap-2">
           {!user ? (
             <>
               <Link
                 to="/login"
-                className="hidden sm:inline-flex items-center px-4 py-2 rounded-xl text-[13px] font-semibold text-tvk-black hover:text-tvk-red hover:bg-tvk-red/5 transition-colors"
+                className="hidden sm:inline-flex items-center h-9 px-3 rounded-md text-[14px] font-medium text-ink-700 hover:text-ink-900 hover:bg-surface-2 transition-colors"
               >
-                Log In
+                Sign in
               </Link>
-              <Link
-                to="/register"
-                className="ripple inline-flex items-center gap-1.5 px-4 sm:px-5 py-2 sm:py-2.5 rounded-xl text-[13px] font-bold text-white shadow-md hover:-translate-y-0.5 transition-all"
-                style={{
-                  background: 'linear-gradient(135deg, #C8102E 0%, #8B0000 100%)',
-                  boxShadow: '0 8px 22px -8px rgba(200,16,46,0.55)',
-                }}
-              >
-                <UserIcon className="w-4 h-4" strokeWidth={2.4} />
+              <Button as={Link} to="/register" kind="primary" size="sm">
                 Register
-              </Link>
+              </Button>
             </>
           ) : (
             <div className="relative" ref={menuRef}>
               <button
+                ref={triggerRef}
                 type="button"
-                onClick={() => setMenuOpen((v) => !v)}
-                className="flex items-center gap-2 pl-1 pr-3 py-1 rounded-full hover:bg-tvk-red/5 transition-all border border-transparent hover:border-tvk-red/15"
+                onClick={() => setMenuOpen(v => !v)}
+                aria-haspopup="menu"
+                aria-expanded={menuOpen}
+                className={cn(
+                  'flex items-center gap-2 h-9 pl-1 pr-2 rounded-md',
+                  'border border-transparent hover:border-hairline hover:bg-surface-2 transition-colors',
+                  'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-red focus-visible:ring-offset-2',
+                )}
               >
-                <span
-                  className="w-9 h-9 rounded-full text-white flex items-center justify-center text-[13px] font-bold shadow-sm"
-                  style={{ background: 'linear-gradient(135deg, #C8102E 0%, #8B0000 100%)' }}
-                >
+                <span className="w-7 h-7 rounded-full bg-surface-2 border border-hairline flex items-center justify-center text-[12px] font-semibold text-ink-900">
                   {initial}
                 </span>
-                <span className="hidden sm:inline text-[13px] font-semibold text-tvk-black max-w-[140px] truncate">
+                <span className="hidden sm:inline text-[13px] font-medium text-ink-900 max-w-[140px] truncate">
                   {user.name || user.phone}
                 </span>
-                <ChevronDown className={`hidden sm:block w-3.5 h-3.5 text-gray-400 transition-transform ${menuOpen ? 'rotate-180' : ''}`} />
+                <ChevronDown className={cn('hidden sm:block w-3.5 h-3.5 text-ink-500 transition-transform', menuOpen && 'rotate-180')} aria-hidden="true" />
               </button>
+
               {menuOpen && (
-                <div className="absolute right-0 mt-3 w-80 rounded-2xl bg-white border border-tvk-red/10 shadow-2xl overflow-hidden">
-                  <div
-                    className="px-5 py-5 relative overflow-hidden"
-                    style={{ background: 'linear-gradient(135deg, #8B0000 0%, #C8102E 60%, #5A0000 100%)' }}
-                  >
-                    <div className="absolute -top-8 -right-8 w-24 h-24 bg-tvk-yellow/15 rounded-full blur-xl"></div>
-                    <div className="relative z-10 flex items-start gap-3.5">
-                      <div className="w-12 h-12 rounded-xl bg-tvk-yellow/20 border border-tvk-yellow/40 flex items-center justify-center flex-shrink-0 backdrop-blur-sm">
-                        <span className="text-base font-bold text-white">{initial}</span>
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <div className="text-[15px] font-bold text-white truncate">{user.name || 'Member'}</div>
-                        <div className="text-[12px] text-tvk-yellow/90 mt-0.5 truncate">+{user.phone}</div>
-                        {user.epic && (
-                          <div className="text-[11px] text-white/70 mt-1 font-medium">EPIC: {user.epic}</div>
-                        )}
-                      </div>
+                <div
+                  role="menu"
+                  className="absolute right-0 mt-2 w-60 rounded-md bg-panel border border-hairline shadow-e2 overflow-hidden"
+                >
+                  <div className="px-4 py-3 border-b border-hairline">
+                    <div className="text-[14px] font-semibold text-ink-900 truncate">
+                      {user.name || 'Member'}
+                    </div>
+                    <div className="text-[12px] text-ink-500 mt-0.5 truncate">
+                      +{user.phone}
                     </div>
                   </div>
 
-                  <div className="py-2">
-                    <button
-                      type="button"
-                      onClick={() => { setMenuOpen(false); navigate('/my-grievances') }}
-                      className="w-full text-left px-5 py-3 text-[13px] text-gray-700 hover:bg-tvk-red/5 hover:text-tvk-red flex items-center gap-3 transition-colors"
-                    >
-                      <UserIcon className="w-4 h-4 flex-shrink-0" strokeWidth={2.2} />
-                      <span className="font-semibold">My Requests</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => { setMenuOpen(false); navigate('/track') }}
-                      className="w-full text-left px-5 py-3 text-[13px] text-gray-700 hover:bg-tvk-red/5 hover:text-tvk-red flex items-center gap-3 transition-colors"
-                    >
-                      <Search className="w-4 h-4 flex-shrink-0" strokeWidth={2.2} />
-                      <span className="font-semibold">Track Grievance</span>
-                    </button>
+                  <div className="py-1">
+                    <MenuItem icon={Eye}    label="My Requests"     onClick={() => { setMenuOpen(false); navigate('/my-grievances') }} />
+                    <MenuItem icon={Search} label="Track Grievance" onClick={() => { setMenuOpen(false); navigate('/track') }} />
                   </div>
 
-                  <div className="border-t border-gray-100"></div>
-
-                  <div className="py-2">
-                    <button
-                      type="button"
+                  <div className="border-t border-hairline py-1">
+                    <MenuItem
+                      icon={LogOut}
+                      label="Sign out"
                       onClick={handleLogout}
-                      className="w-full text-left px-5 py-3 text-[13px] text-red-600 hover:bg-red-50 flex items-center gap-3 transition-colors"
-                    >
-                      <LogOut className="w-4 h-4 flex-shrink-0" strokeWidth={2.2} />
-                      <span className="font-semibold">Sign Out</span>
-                    </button>
+                      tone="danger"
+                    />
                   </div>
                 </div>
               )}
             </div>
           )}
-
-          {/* Mobile menu toggle */}
-          <button
-            type="button"
-            onClick={() => setMobileOpen((v) => !v)}
-            className="md:hidden p-2 rounded-xl text-tvk-black hover:bg-tvk-red/5 transition-colors"
-            aria-label="Toggle menu"
-          >
-            {mobileOpen ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
-          </button>
         </div>
       </div>
-
-      {/* Mobile drawer */}
-      {mobileOpen && (
-        <div className="md:hidden border-t border-tvk-red/10 bg-white shadow-lg">
-          <nav className="max-w-6xl mx-auto px-4 py-3 flex flex-col gap-1">
-            {navItems.map(({ to, label, Icon }) => (
-              <NavLink
-                key={to}
-                to={to}
-                end={to === '/'}
-                onClick={() => setMobileOpen(false)}
-                className={({ isActive }) =>
-                  `flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-semibold transition-all ${
-                    isActive
-                      ? 'text-white shadow-md'
-                      : 'text-tvk-black hover:bg-tvk-red/5 hover:text-tvk-red'
-                  }`
-                }
-                style={({ isActive }) =>
-                  isActive
-                    ? { background: 'linear-gradient(135deg, #C8102E 0%, #8B0000 100%)' }
-                    : undefined
-                }
-              >
-                <Icon className="w-4 h-4" strokeWidth={2.2} />
-                {label}
-              </NavLink>
-            ))}
-            {!user && (
-              <Link
-                to="/login"
-                onClick={() => setMobileOpen(false)}
-                className="mt-1 px-4 py-3 rounded-xl text-sm font-semibold text-tvk-black bg-tvk-red/5 text-center hover:bg-tvk-red/10 transition-colors"
-              >
-                Log In
-              </Link>
-            )}
-          </nav>
-        </div>
-      )}
     </header>
+  )
+}
+
+function MenuItem({ icon: Icon, label, onClick, tone }) {
+  return (
+    <button
+      type="button"
+      role="menuitem"
+      onClick={onClick}
+      className={cn(
+        'w-full text-left px-4 py-2 text-[13px] font-medium flex items-center gap-3 transition-colors',
+        'focus-visible:outline-none focus-visible:bg-surface-2',
+        tone === 'danger'
+          ? 'text-status-danger hover:bg-status-danger/5'
+          : 'text-ink-700 hover:bg-surface-2 hover:text-ink-900',
+      )}
+    >
+      <Icon className="w-4 h-4 shrink-0" aria-hidden="true" />
+      {label}
+    </button>
   )
 }

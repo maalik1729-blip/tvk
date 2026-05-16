@@ -2,32 +2,37 @@ import { useState, useCallback, useEffect, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
   MapPin, Send, ChevronRight, AlertCircle, Camera, X,
-  Loader2, ExternalLink, FileText, ArrowLeft, CheckCircle2, Clock, ArrowRight, Info, Check, Lightbulb, Edit2, Upload, Plus, Search, Phone, Menu, PanelLeftClose, PanelLeftOpen
+  ExternalLink, FileText, ArrowLeft, CheckCircle2, Info,
+  Edit2, Upload, Plus, Search, Phone, ArrowRight,
 } from 'lucide-react'
 import api from '../lib/api'
 import { useAuth } from '../lib/auth'
 import LocationPicker from '../components/LocationPicker'
+import { Button, Card, TextField, EmptyState, ConfirmDialog, cn } from '../components/ui'
 
 /**
- * Phase machine that mirrors the WhatsApp flow's terminal actions defined in
- * backend/services/issueActions.js. The route AFTER sub-category branches on
- * optionObj.action.kind so each grievance type asks for only the fields that
- * specific issue needs — location-only, location+photo, description, or just
- * a URL/PDF resource pointer with no ticket created at all.
+ * Grievance wizard.
+ *
+ * UX shell rebuilt per outputs/02 (W1, W2, W5) + outputs/03 + outputs/04:
+ * - Top step indicator + breadcrumb (instead of destructive sidebar mid-wizard)
+ * - One sidebar of categories visible only on phase=CATEGORY (left rail) on lg+
+ * - Confirm-discard before silently resetting form state when changing category
+ * - Sticky bottom action bar inside content phases on mobile
+ * - Single primary action per screen, no bespoke buttons
+ *
+ * Backend contracts are unchanged: /portal/services + /portal/grievances.
+ * The PHASE/FLOWS/LABELS machine and RESOURCE_MAP are preserved verbatim.
  */
 const PHASE = {
   CATEGORY: 'category',
   OPTION:   'option',
-  CTA:      'cta',      // for kind=url / kind=pdf  (no ticket)
-  DETAILS:  'details',  // for kind=ticket / details_then_url
-  LOCATION: 'location', // for both location flows
-  PHOTO:    'photo',    // for location_photos_ticket
+  CTA:      'cta',      // url / pdf actions terminate here (no ticket)
+  DETAILS:  'details',
+  LOCATION: 'location',
+  PHOTO:    'photo',
   CONFIRM:  'confirm',
 }
 
-// Ordered phase sequence per action kind — drives the progress bar and the
-// "Back" buttons. CTA flows (url/pdf) terminate at the CTA step without
-// hitting /portal/grievances.
 const FLOWS = {
   url:                    [PHASE.CATEGORY, PHASE.OPTION, PHASE.CTA],
   pdf:                    [PHASE.CATEGORY, PHASE.OPTION, PHASE.CTA],
@@ -46,31 +51,20 @@ const LABELS = {
   location_photos_ticket: ['Category', 'Issue', 'Location', 'Photo', 'Done'],
 }
 
-// Sensible default when an option has no action mapping (shouldn't normally
-// happen, but keeps the wizard usable in that edge case).
 const DEFAULT_KIND = 'ticket'
-
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024
 
-// Frontend fallback: enriches backend options with gov portal links & contacts
-// from the master spreadsheet. Keyed by sub-category title (case-sensitive).
 const RESOURCE_MAP = {
-  // Revenue
   'Income Certificate Issue': { url: 'https://www.tnesevai.tn.gov.in/Citizen/PortalLogin.aspx', contact: '914440164907' },
   'Disaster Relief': { url: 'https://it.tn.gov.in/en/IT_Infrastructure/Tamilnadu_Disaster_Recovery_Centre', contact: '044-2567 0783' },
   'Death / Birth Certificate': { url: 'https://www.crstn.org/birth_death_tn/', contact: null },
-  // Ration
   'Update ration card': { url: 'https://www.tnpds.gov.in/pages/registeracard/register-a-card-status.xhtml', contact: 'https://www.tnpds.gov.in/pages/staticPages/contact-us.xhtml' },
-  // Agriculture
   'Flood Compensation': { url: 'https://www.tnagrisnet.tn.gov.in/login', contact: '044-28583323' },
-  // Education
   'Job Recruitment': { url: 'https://www.tnprivatejobs.tn.gov.in/', contact: '044-22500900 / 044-22500911' },
-  // Health
   'Health': { url: 'https://tnhealth.tn.gov.in/', contact: '044-2231 0989 / 044-2232 1090 / 044-2232 1085 / 044-2234 2142' },
   'Vaccination': { url: 'https://uwin.mohfw.gov.in/home', contact: '0120-4783222' },
   'Basic medicine': { url: 'https://tnhealth.tn.gov.in/dph/dphis.php', contact: null },
   'Tamilnadu camp & others': { url: 'https://www.nhm.tn.gov.in/en/node/6367', contact: '044-29510304' },
-  // Law & Order
   'Legal': { url: 'https://tamilnadu.nalsa.gov.in/', contact: '044-25342834 / 044-25343353 / 044-25343144' },
   "CITIZEN'S CHARTER OF TAMIL NADU POLICE": { url: 'https://eservices.tnpolice.gov.in:8443/archived_cctns/CitizenCharter', contact: '044-24957878 / 044-24958585' },
   'Safety': { url: 'https://dish.tn.gov.in/#/', contact: '044-22502103 / 044-22502104' },
@@ -81,8 +75,6 @@ export default function GrievanceHome() {
   const navigate = useNavigate()
 
   const [phase, setPhase] = useState(PHASE.CATEGORY)
-  const [sidebarOpen, setSidebarOpen] = useState(true)
-  const sidebarRef = useRef(null)
   const [serviceObj, setServiceObj] = useState(null)
   const [optionObj, setOptionObj] = useState(null)
   const [location, setLocation] = useState({ text: '', lat: null, lng: null })
@@ -95,28 +87,30 @@ export default function GrievanceHome() {
   const [grievanceId, setGrievanceId] = useState(null)
   const [submitError, setSubmitError] = useState('')
   const [toast, setToast] = useState(null)
-  const [showMapPicker, setShowMapPicker] = useState(false)
 
-  // Catalog fetched from /portal/services — same admin-uploaded icons that
-  // drive the WhatsApp flow show up here, single source of truth.
   const [services, setServices] = useState([])
   const [catalogLoading, setCatalogLoading] = useState(true)
   const [catalogError, setCatalogError] = useState('')
 
-  const [activeCategoryPreview, setActiveCategoryPreview] = useState(null)
+  // Single confirm-discard dialog driven by a pending action.
+  // Shape: { title, description, confirmLabel, onConfirm } | null
+  const [confirm, setConfirm] = useState(null)
+  const askConfirm = (cfg) => setConfirm(cfg)
+  const closeConfirm = () => setConfirm(null)
 
+  // Fetch service catalog
   useEffect(() => {
     let alive = true
     setCatalogLoading(true); setCatalogError('')
     api.get('/portal/services')
-      .then((res) => { 
-        if (alive) {
-          const srvs = Array.isArray(res.data?.services) ? res.data.services : []
-          setServices(srvs)
-          if (srvs.length > 0) setActiveCategoryPreview(srvs[0])
-        } 
+      .then((res) => {
+        if (!alive) return
+        const srvs = Array.isArray(res.data?.services) ? res.data.services : []
+        setServices(srvs)
       })
-      .catch((err) => { if (alive) setCatalogError(err.response?.data?.error || 'Could not load services. Please retry in a moment.') })
+      .catch((err) => {
+        if (alive) setCatalogError(err.response?.data?.error || 'Could not load services. Please retry in a moment.')
+      })
       .finally(() => { if (alive) setCatalogLoading(false) })
     return () => { alive = false }
   }, [])
@@ -127,13 +121,18 @@ export default function GrievanceHome() {
   const labels = LABELS[kind] || LABELS[DEFAULT_KIND]
   const stepIndex = Math.max(0, flow.indexOf(phase))
 
-  /* ─── handlers ─────────────────────────────────────────────────── */
+  /* ────────────────────────── handlers ────────────────────────── */
+
+  const showToast = (msg, ms = 4000) => {
+    setToast(msg)
+    setTimeout(() => setToast(null), ms)
+  }
 
   const handleImageChange = (e) => {
     const file = e.target.files[0]
     if (!file) return
     if (file.size > MAX_IMAGE_BYTES) {
-      alert('Image too large. Please select a photo smaller than 10MB.')
+      showToast('That photo is too large. Please choose one under 10 MB.')
       e.target.value = ''
       return
     }
@@ -141,123 +140,47 @@ export default function GrievanceHome() {
     setImagePreview(URL.createObjectURL(file))
   }
 
-  const removeImage = () => {
-    setImage(null); setImagePreview(null)
-  }
+  const removeImage = () => { setImage(null); setImagePreview(null) }
 
   const handleLocationSelect = useCallback((loc) => setLocation(loc), [])
 
   const [geoLoading, setGeoLoading] = useState(false)
   const fetchCurrentLocation = () => {
-    if (!navigator.geolocation) { setToast('Geolocation is not supported by your browser.'); setTimeout(() => setToast(null), 5000); return }
+    if (!navigator.geolocation) {
+      showToast('Geolocation is not supported by your browser.')
+      return
+    }
     setGeoLoading(true)
     navigator.geolocation.getCurrentPosition(
       async (pos) => {
         let { latitude, longitude } = pos.coords
-        // Validate India bounds (lat: 6-37, lng: 68-98). If outside, default to Chennai.
         const inIndia = latitude >= 6 && latitude <= 37 && longitude >= 68 && longitude <= 98
-        if (!inIndia) {
-          latitude = 13.0827; longitude = 80.2707
-        }
+        if (!inIndia) { latitude = 13.0827; longitude = 80.2707 }
         try {
           const res = await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${latitude}&lon=${longitude}&zoom=18&countrycodes=in`)
           const data = await res.json()
           const addr = data.address || {}
           const shortAddr = [addr.road, addr.suburb || addr.neighbourhood, addr.city || addr.town || addr.county, addr.state].filter(Boolean).join(', ')
-          setLocation({ ...location, text: shortAddr || data.display_name || `${latitude.toFixed(5)}, ${longitude.toFixed(5)}`, lat: latitude, lng: longitude, street: addr.road || '' })
-          if (!inIndia) { setToast('Location outside India — defaulted to Chennai. Please select your district & area.'); setTimeout(() => setToast(null), 5000) }
+          setLocation({
+            ...location,
+            text: shortAddr || data.display_name || `${latitude.toFixed(5)}, ${longitude.toFixed(5)}`,
+            lat: latitude, lng: longitude,
+            street: addr.road || '',
+          })
+          if (!inIndia) showToast('Location outside India — defaulted to Chennai.')
         } catch {
           setLocation({ ...location, text: `${latitude.toFixed(5)}, ${longitude.toFixed(5)}`, lat: latitude, lng: longitude })
         } finally { setGeoLoading(false) }
       },
-      (err) => { setToast('Unable to get location: ' + err.message); setTimeout(() => setToast(null), 5000); setGeoLoading(false) },
-      { enableHighAccuracy: true, timeout: 10000 }
+      (err) => { showToast('Unable to get location: ' + err.message); setGeoLoading(false) },
+      { enableHighAccuracy: true, timeout: 10000 },
     )
   }
 
-  const openGoogleMapsPicker = () => {
-    // Center on Tamil Nadu coordinates
-    const tnCoords = { lat: 11.1271, lng: 78.6569 }
-    const mapUrl = `https://www.google.com/maps/@${tnCoords.lat},${tnCoords.lng},7z`
-    
-    // Open Google Maps in new window
-    const mapWindow = window.open(mapUrl, 'GoogleMapsPicker', 'width=1000,height=800')
-    
-    setToast('📍 Click on a location in Google Maps. The URL will update with coordinates. Copy the URL and paste it back here.')
-    setTimeout(() => setToast(null), 8000)
-    
-    // Prompt user to paste the Google Maps URL
-    setTimeout(() => {
-      const mapsUrl = prompt('Paste the Google Maps URL here after selecting your location:')
-      if (mapsUrl) {
-        extractLocationFromUrl(mapsUrl)
-      }
-    }, 2000)
-  }
+  // True if user has typed/picked anything that resetDownstream would discard.
+  const hasDirtyDownstream = () =>
+    title.trim() || description.trim() || location.text || image
 
-  const extractLocationFromUrl = async (url) => {
-    try {
-      // Extract coordinates from Google Maps URL
-      // Format: https://www.google.com/maps/@13.0368,80.2676,17z or https://www.google.com/maps/place/.../@13.0368,80.2676
-      const coordMatch = url.match(/@(-?\d+\.\d+),(-?\d+\.\d+)/)
-      
-      if (!coordMatch) {
-        setToast('❌ Could not extract coordinates from URL. Please try again.')
-        setTimeout(() => setToast(null), 5000)
-        return
-      }
-
-      const lat = parseFloat(coordMatch[1])
-      const lng = parseFloat(coordMatch[2])
-
-      // Check if coordinates are somewhat within India bounds
-      if (lat < 6 || lat > 37 || lng < 68 || lng > 98) {
-        setToast('⚠️ Please select a location within India.')
-        setTimeout(() => setToast(null), 5000)
-        return
-      }
-
-      setGeoLoading(true)
-
-      // Reverse geocode to get street address
-      const res = await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lng}&zoom=18&countrycodes=in`)
-      const data = await res.json()
-      
-      if (data && data.address) {
-        const addr = data.address
-        const street = addr.road || addr.street || addr.neighbourhood || addr.suburb || ''
-        const landmark = addr.amenity || addr.building || ''
-        const houseNumber = addr.house_number || ''
-
-        let streetAddress = ''
-        if (houseNumber) streetAddress += houseNumber + ', '
-        if (street) streetAddress += street
-        else if (landmark) streetAddress += landmark
-
-        const finalStreet = streetAddress || `${lat.toFixed(6)}, ${lng.toFixed(6)}`
-        const base = location.area ? `${location.area}, ${location.district}` : location.district || ''
-        
-        setLocation({
-          ...location,
-          street: finalStreet,
-          text: `${finalStreet}, ${base}`,
-          lat,
-          lng
-        })
-
-        setToast('✅ Location added successfully!')
-        setTimeout(() => setToast(null), 3000)
-      }
-    } catch (err) {
-      setToast('❌ Failed to fetch address. Please try again.')
-      setTimeout(() => setToast(null), 5000)
-    } finally {
-      setGeoLoading(false)
-    }
-  }
-
-  // Wipe everything past sub-category so going Back never carries a stale
-  // description / location / photo into a different action kind.
   const resetDownstream = () => {
     setLocation({ text: '', lat: null, lng: null })
     setTitle('')
@@ -269,11 +192,23 @@ export default function GrievanceHome() {
   }
 
   const pickService = (s) => {
-    setServiceObj(s); setOptionObj(null); resetDownstream(); setPhase(PHASE.OPTION)
+    const apply = () => {
+      setServiceObj(s); setOptionObj(null); resetDownstream(); setPhase(PHASE.OPTION)
+    }
+    if (hasDirtyDownstream()) {
+      askConfirm({
+        title: 'Switch category?',
+        description: "The details you've entered will be discarded.",
+        confirmLabel: 'Discard & switch',
+        tone: 'danger',
+        onConfirm: () => { closeConfirm(); apply() },
+      })
+      return
+    }
+    apply()
   }
 
   const pickOption = (o) => {
-    // Enrich option with frontend resource map (gov links & contacts)
     const override = RESOURCE_MAP[o.title]
     if (override) {
       o = {
@@ -283,7 +218,7 @@ export default function GrievanceHome() {
           kind: o.action?.kind || 'url',
           url: override.url || o.action?.url,
           contact: override.contact || o.action?.contact,
-        }
+        },
       }
     }
     setOptionObj(o); resetDownstream()
@@ -294,21 +229,15 @@ export default function GrievanceHome() {
 
   const submitTicket = async () => {
     if (!user) {
-      setToast('Please log in to submit a grievance.'); setTimeout(() => setToast(null), 5000)
-      navigate('/login')
-      return
+      showToast('Please sign in to submit a grievance.')
+      navigate('/login'); return
     }
     if (!serviceObj || !optionObj) return
-
-    // Validate required fields
     if (!description || !description.trim()) {
-      setSubmitError('Please provide a description of the issue.')
-      return
+      setSubmitError('Please describe the issue before submitting.'); return
     }
-
     if (!certified) {
-      setSubmitError('Please certify that the information is accurate before submitting.')
-      return
+      setSubmitError('Please certify the information is accurate before submitting.'); return
     }
 
     setLoading(true); setSubmitError('')
@@ -318,1131 +247,833 @@ export default function GrievanceHome() {
       fd.append('serviceTitle', serviceObj.title)
       fd.append('optionId',     optionObj.id)
       fd.append('optionTitle',  optionObj.title)
-      // Combine title and description
       const fullDescription = title.trim() ? `${title.trim()}\n\n${description.trim()}` : description.trim()
       fd.append('description',  fullDescription)
       fd.append('location',     location.text || '')
       if (location.lat != null) fd.append('lat', location.lat)
       if (location.lng != null) fd.append('lng', location.lng)
-
-      // If no image provided, create a placeholder image
       if (image) {
         fd.append('image', image)
       } else {
-        // Create a minimal 1x1 transparent PNG as placeholder
+        // 1×1 transparent PNG placeholder so backend always receives a file part
         const placeholderBlob = await new Promise((resolve) => {
           const canvas = document.createElement('canvas')
-          canvas.width = 1
-          canvas.height = 1
+          canvas.width = 1; canvas.height = 1
           canvas.toBlob(resolve, 'image/png')
         })
         fd.append('image', placeholderBlob, 'placeholder.png')
       }
-
       const res = await api.post('/portal/grievances', fd, {
         headers: { 'Content-Type': 'multipart/form-data' },
       })
       setGrievanceId(res.data.grievanceId)
       setPhase(PHASE.CONFIRM)
     } catch (err) {
-      const errorMsg = err.response?.data?.error || 'Failed to submit. Please check your connection and try again.'
-      setSubmitError(errorMsg)
+      setSubmitError(err.response?.data?.error || 'Could not submit. Check your connection and try again.')
     } finally {
       setLoading(false)
     }
   }
 
-  /* ─── render ───────────────────────────────────────────────────── */
+  /* ─── breadcrumb back navigation ────────────────────────────── */
+
+  const goBackOneStep = () => {
+    const i = flow.indexOf(phase)
+    if (i <= 0) return
+    setPhase(flow[i - 1])
+    setSubmitError('')
+  }
+
+  const startOver = () => {
+    const apply = () => {
+      setServiceObj(null); setOptionObj(null); resetDownstream()
+      setPhase(PHASE.CATEGORY)
+    }
+    if (hasDirtyDownstream() || serviceObj) {
+      askConfirm({
+        title: 'Start a new grievance?',
+        description: 'Your current draft will be cleared.',
+        confirmLabel: 'Start over',
+        tone: 'danger',
+        onConfirm: () => { closeConfirm(); apply() },
+      })
+      return
+    }
+    apply()
+  }
+
+  /* ──────────────────────────── render ──────────────────────────── */
 
   return (
-    <div className="flex min-h-[calc(100vh-80px)] bg-[#f4f6f8]">
+    <div className="bg-surface min-h-[calc(100vh-3.5rem)] lg:min-h-[calc(100vh-4rem)]">
 
-      {/* Toast Notification */}
+      {/* Toast */}
       {toast && (
-        <div className="fixed top-6 right-6 z-50 animate-slide-in-right max-w-sm">
-          <div className="bg-[#8B0000] text-white px-5 py-3.5 rounded-xl shadow-2xl flex items-start gap-3 border border-white/10">
-            <AlertCircle className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
-            <p className="text-sm font-medium leading-relaxed break-words">{toast}</p>
-            <button onClick={() => setToast(null)} className="text-white/50 hover:text-white shrink-0 ml-2 mt-0.5">
+        <div role="status" aria-live="polite" className="fixed bottom-20 lg:bottom-6 left-1/2 -translate-x-1/2 z-[60]">
+          <div className="bg-ink-900 text-white px-4 h-11 flex items-center gap-3 rounded-md shadow-e2 max-w-[90vw]">
+            <AlertCircle className="w-4 h-4 text-status-warning shrink-0" aria-hidden="true" />
+            <span className="text-[14px] font-medium">{toast}</span>
+            <button
+              onClick={() => setToast(null)}
+              className="text-white/60 hover:text-white shrink-0 ml-1"
+              aria-label="Dismiss"
+            >
               <X className="w-4 h-4" />
             </button>
           </div>
         </div>
       )}
 
-      {/* Sidebar toggle button (floating) */}
-      <button
-        onClick={(e) => { e.stopPropagation(); setSidebarOpen(o => !o) }}
-        className={`hidden lg:flex fixed top-[84px] z-40 w-10 h-10 rounded-xl bg-white shadow-[0_6px_18px_-6px_rgba(200,16,46,0.35)] border border-[#C8102E]/15 items-center justify-center text-[#C8102E] hover:border-[#C8102E]/40 hover:shadow-[0_10px_24px_-8px_rgba(200,16,46,0.5)] transition-[left,transform,box-shadow] duration-300 ${sidebarOpen ? 'left-[244px] xl:left-[264px]' : 'left-3'}`}
-        title={sidebarOpen ? 'Hide categories' : 'Show categories'}
-      >
-        {sidebarOpen ? <PanelLeftClose className="w-5 h-5" strokeWidth={2.2} /> : <PanelLeftOpen className="w-5 h-5" strokeWidth={2.2} />}
-      </button>
+      {/* Step indicator + breadcrumb */}
+      <div className="border-b border-hairline bg-surface sticky top-14 lg:top-16 z-30">
+        <div className="max-w-[1200px] mx-auto px-4 lg:px-8 h-12 flex items-center gap-3">
 
-      {/* ── LEFT SIDEBAR (COLLAPSIBLE STICKY DRAWER) ── */}
-      <aside
-        ref={sidebarRef}
-        className={`hidden lg:flex shrink-0 sticky top-[68px] self-start max-h-[calc(100vh-68px)] z-20 overflow-hidden transition-[width] duration-300 ease-out ${sidebarOpen ? 'w-[260px] xl:w-[280px]' : 'w-0'}`}
-      >
-        <div className="w-[260px] xl:w-[280px] flex flex-col h-[calc(100vh-68px)] bg-white border-r border-gray-100 overflow-y-auto custom-scrollbar shadow-[4px_0_24px_-12px_rgba(200,16,46,0.18)]">
-        {/* Sidebar header with TVK flag */}
-        <div className="px-5 pt-6 pb-4 border-b border-gray-100">
-          <div className="flex items-center gap-2.5">
-            <div className="w-8 h-8 rounded-lg overflow-hidden flex items-center justify-center shrink-0 shadow-sm ring-1 ring-[#C8102E]/15"
-                 style={{ background: 'linear-gradient(135deg, #C8102E 0%, #8B0000 100%)' }}>
-              <img
-                src="/f1c0ef41-c286-4bb3-807b-a2c94904e4b4.png"
-                alt="TVK"
-                className="w-7 h-7 object-cover rounded-[4px]"
-              />
-            </div>
-            <div className="min-w-0">
-              <h3 className="text-[10px] font-extrabold text-gray-500 tracking-[0.18em] uppercase leading-tight">Grievance</h3>
-              <h3 className="text-[13px] font-extrabold text-[#0A0A0A] tracking-tight leading-tight">Categories</h3>
-            </div>
-          </div>
-        </div>
-        
-        {catalogLoading && (
-          <div className="flex items-center justify-center py-12 text-gray-400">
-            <Loader2 className="w-5 h-5 animate-spin mr-2" />
-            <span className="text-sm">Loading services...</span>
-          </div>
-        )}
+          {/* Breadcrumb */}
+          <nav aria-label="Breadcrumb" className="flex items-center gap-1 text-[13px] text-ink-500 min-w-0 flex-1">
+            <button
+              type="button"
+              onClick={startOver}
+              className="rounded-md px-1.5 py-1 hover:bg-surface-2 hover:text-ink-900 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-red focus-visible:ring-offset-2"
+            >
+              Categories
+            </button>
 
-        {!catalogLoading && catalogError && (
-          <div className="flex items-start gap-2 bg-red-50 text-red-700 p-4 m-4 rounded-xl text-sm">
-            <AlertCircle className="w-5 h-5 flex-shrink-0" />
-            <div>{catalogError}</div>
-          </div>
-        )}
-
-        {!catalogLoading && !catalogError && (
-          <nav className="flex-1 pb-4 pt-2 flex flex-col gap-0.5">
-            {services.map((s) => {
-              const isActive = (activeCategoryPreview?.id === s.id && phase === PHASE.CATEGORY) || (serviceObj?.id === s.id && phase !== PHASE.CATEGORY);
-              return (
-                <button
-                  key={s.id}
-                  onClick={() => {
-                    setActiveCategoryPreview(s)
-                    setPhase(PHASE.CATEGORY)
-                  }}
-                  className={`group relative w-full flex items-center gap-3 px-5 py-3 text-left transition-all duration-300 ${
-                    isActive
-                      ? 'text-white font-bold'
-                      : 'text-gray-700 hover:text-[#C8102E] font-semibold hover:bg-[#C8102E]/[0.04]'
-                  }`}
-                  style={isActive ? { background: 'linear-gradient(90deg, #C8102E 0%, #8B0000 100%)', boxShadow: '0 8px 18px -10px rgba(200,16,46,0.55)' } : undefined}
-                >
-                  {/* Active side accent bar */}
-                  {isActive && (
-                    <span className="absolute left-0 top-2 bottom-2 w-1 rounded-r-full" style={{ background: 'linear-gradient(180deg, #FFD60A 0%, #FF8C00 100%)' }} />
-                  )}
-                  {/* Original API SVG icon */}
-                  <span className={`flex items-center justify-center shrink-0 transition-transform duration-300 group-hover:scale-110 ${
-                    isActive
-                      ? 'w-7 h-7 rounded-lg bg-white shadow-sm p-1 text-[#C8102E]'
-                      : 'w-6 h-6 text-[#C8102E]'
-                  }`}>
-                    {s.iconUrl ? (
-                      <img
-                        src={s.iconUrl}
-                        alt={s.title}
-                        className="w-full h-full object-contain"
-                      />
-                    ) : (
-                      <div className="font-bold text-sm">{s.title?.charAt(0)}</div>
-                    )}
-                  </span>
-                  <span className="text-[15px] truncate flex-1">{s.title}</span>
-                  <ChevronRight className={`w-4 h-4 transition-all duration-300 shrink-0 ${
-                    isActive ? 'text-white translate-x-0.5' : 'text-gray-300 group-hover:text-[#C8102E] group-hover:translate-x-0.5'
-                  }`} />
-                </button>
-              )
-            })}
-          </nav>
-        )}
-
-        {/* ── BOTTOM HELP BLOCK ── */}
-        <div className="mt-auto p-5 border-t border-gray-100"
-             style={{ background: 'linear-gradient(180deg, rgba(200,16,46,0.04) 0%, rgba(200,16,46,0.08) 100%)' }}>
-          <button className="w-full text-left group flex items-start gap-3 p-3 rounded-2xl bg-white border border-[#C8102E]/15 hover:border-[#C8102E]/40 hover:shadow-[0_8px_20px_-8px_rgba(200,16,46,0.25)] transition-all">
-            <div className="w-9 h-9 rounded-xl flex items-center justify-center shrink-0 shadow-sm"
-                 style={{ background: 'linear-gradient(135deg, #C8102E 0%, #8B0000 100%)' }}>
-              <Info className="w-4 h-4 text-white" strokeWidth={2.4} />
-            </div>
-            <div className="flex-1 min-w-0">
-              <div className="text-[13px] font-extrabold text-[#0A0A0A] leading-tight">Need help?</div>
-              <div className="text-[11px] text-gray-500 mt-0.5 leading-snug">Talk to our citizen support</div>
-            </div>
-            <ChevronRight className="w-4 h-4 text-[#C8102E] mt-2 shrink-0 group-hover:translate-x-0.5 transition-transform" />
-          </button>
-        </div>
-        </div>
-      </aside>
-
-      {/* ── MAIN RIGHT CONTENT (clicking here closes sidebar) ── */}
-      <div
-        className="flex-1 bg-transparent overflow-y-auto min-w-0 pb-20"
-        onClick={() => { if (sidebarOpen) setSidebarOpen(false) }}
-      >
-        <div className="max-w-[1100px] mx-auto p-6 lg:p-12">
-          
-          {/* Progress Bar — Stitch Style */}
-          {(() => {
-            let currentStep = 0;
-            if (phase === PHASE.CATEGORY) currentStep = 0;
-            else if (phase === PHASE.OPTION) currentStep = 1;
-            else if (phase === PHASE.DETAILS || phase === PHASE.LOCATION || phase === PHASE.PHOTO) currentStep = 1;
-            else if (phase === PHASE.CONFIRM) currentStep = 2;
-            
-            return (
-              <div className="max-w-2xl mx-auto mb-12 mt-2">
-                <div className="flex items-center justify-between relative">
-                  {/* Connecting Lines */}
-                  <div className="absolute left-[16%] right-[16%] top-[22px] h-[3px] bg-gray-200 rounded-full z-0"></div>
-                  <div className="absolute left-[16%] top-[22px] h-[3px] rounded-full z-0 transition-all duration-700"
-                       style={{
-                         width: currentStep === 0 ? '0%' : currentStep === 1 ? '34%' : '68%',
-                         background: 'linear-gradient(90deg, #C8102E 0%, #FF8C00 50%, #FFD60A 100%)',
-                         boxShadow: '0 0 14px rgba(200,16,46,0.45)',
-                       }}></div>
-
-                  {['Category', 'Details', 'Review'].map((label, i) => {
-                    const done = i < currentStep
-                    const active = i === currentStep
-                    return (
-                      <div key={label} className="flex flex-col items-center gap-2.5 z-10">
-                        <div className={`relative w-11 h-11 rounded-full flex items-center justify-center text-sm font-extrabold transition-all duration-500 ${
-                          done || active ? 'text-white' : 'text-gray-400 bg-white border-2 border-gray-200'
-                        }`}
-                             style={done || active ? {
-                               background: 'linear-gradient(135deg, #C8102E 0%, #8B0000 100%)',
-                               boxShadow: active
-                                 ? '0 0 0 6px rgba(200,16,46,0.12), 0 8px 22px -6px rgba(200,16,46,0.5)'
-                                 : '0 6px 16px -6px rgba(200,16,46,0.4)'
-                             } : undefined}>
-                          {done ? <Check className="w-5 h-5" strokeWidth={3} /> : i + 1}
-                          {active && (
-                            <span className="absolute inset-0 rounded-full animate-ping" style={{ background: 'rgba(200,16,46,0.25)' }} />
-                          )}
-                        </div>
-                        <span className={`text-[11px] font-extrabold uppercase tracking-[0.18em] ${
-                          done || active ? 'text-[#8B0000]' : 'text-gray-400'
-                        }`}>{label}</span>
-                      </div>
-                    )
-                  })}
-                </div>
-              </div>
-            )
-          })()}
-
-          {/* ── PHASE: CATEGORY ── */}
-          {phase === PHASE.CATEGORY && (
-            <div className="animate-fade-in">
-              <h2 className="text-3xl font-bold text-[#C8102E] mb-3">Select Issue Category</h2>
-              <p className="text-gray-500 text-[14px] mb-8">Please choose the department that best aligns with your grievance for faster resolution.</p>
-
-              {/* MOBILE/TABLET CATEGORY GRID */}
-              <div className="lg:hidden grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3 mb-8">
-                {services.map((s) => (
+            {serviceObj && (
+              <>
+                <ChevronRight className="w-3.5 h-3.5 text-ink-400 shrink-0" aria-hidden="true" />
+                {phase === PHASE.OPTION ? (
+                  <span className="text-ink-900 font-medium truncate">{serviceObj.title}</span>
+                ) : (
                   <button
-                    key={s.id}
-                    onClick={() => setActiveCategoryPreview(s)}
-                    className={`flex flex-col items-center justify-center p-4 rounded-2xl border transition-all ${
-                      activeCategoryPreview?.id === s.id
-                        ? 'border-[#C8102E] bg-[#f4f6f8] text-[#C8102E] shadow-[inset_0_0_0_1px_#C8102E]'
-                        : 'border-gray-200 bg-white text-gray-500 hover:border-gray-300 hover:bg-gray-50'
-                    }`}
+                    type="button"
+                    onClick={() => {
+                      const apply = () => { resetDownstream(); setPhase(PHASE.OPTION) }
+                      if (hasDirtyDownstream()) {
+                        askConfirm({
+                          title: 'Go back to issue selection?',
+                          description: 'Your details will be discarded.',
+                          confirmLabel: 'Discard & go back',
+                          tone: 'danger',
+                          onConfirm: () => { closeConfirm(); apply() },
+                        })
+                        return
+                      }
+                      setPhase(PHASE.OPTION)
+                    }}
+                    className="rounded-md px-1.5 py-1 hover:bg-surface-2 hover:text-ink-900 transition-colors truncate focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-red focus-visible:ring-offset-2"
                   >
-                    <div className={`w-8 h-8 mb-3 flex items-center justify-center shrink-0 ${
-                      activeCategoryPreview?.id === s.id ? 'text-[#C8102E]' : 'text-gray-400'
-                    }`}>
-                      {s.iconUrl ? (
-                        <img src={s.iconUrl} alt={s.title} className="w-full h-full object-contain" />
+                    {serviceObj.title}
+                  </button>
+                )}
+              </>
+            )}
+
+            {optionObj && phase !== PHASE.OPTION && (
+              <>
+                <ChevronRight className="w-3.5 h-3.5 text-ink-400 shrink-0" aria-hidden="true" />
+                <span className="text-ink-900 font-medium truncate">{optionObj.title}</span>
+              </>
+            )}
+          </nav>
+
+          {/* Step counter */}
+          {flow.length > 1 && phase !== PHASE.CATEGORY && phase !== PHASE.CONFIRM && (
+            <span className="text-[12px] font-semibold text-ink-500 shrink-0 hidden sm:inline">
+              Step {stepIndex + 1} of {flow.length} · {labels[stepIndex]}
+            </span>
+          )}
+        </div>
+      </div>
+
+      {/* Body */}
+      <div className="max-w-[1200px] mx-auto px-4 lg:px-8 py-6 lg:py-10">
+
+        {/* ───────────────────────── PHASE: CATEGORY ───────────────────────── */}
+        {phase === PHASE.CATEGORY && (
+          <section>
+            <header className="mb-6 lg:mb-8">
+              <h1 className="text-[24px] lg:text-[32px] font-bold tracking-[-0.015em] text-ink-900">
+                What's wrong?
+              </h1>
+              <p className="mt-1 text-[14px] text-ink-500">
+                Pick a category to get started. Filing takes about a minute and a half.
+              </p>
+            </header>
+
+            {catalogLoading ? (
+              <CatalogLoading />
+            ) : catalogError ? (
+              <Card className="p-6 flex items-start gap-3 border-status-danger/30 bg-status-danger/5">
+                <AlertCircle className="w-5 h-5 text-status-danger shrink-0 mt-0.5" aria-hidden="true" />
+                <div className="text-[14px] text-ink-700">{catalogError}</div>
+              </Card>
+            ) : services.length === 0 ? (
+              <EmptyState
+                icon={<FileText className="w-7 h-7" />}
+                title="No categories available"
+                body="Please try again in a few moments."
+                action={null}
+              />
+            ) : (
+              <ul className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 lg:gap-4">
+                {services.map((s) => (
+                  <li key={s.id}>
+                    <button
+                      type="button"
+                      onClick={() => pickService(s)}
+                      className={cn(
+                        'w-full text-left h-full bg-panel border border-hairline rounded-lg p-4 lg:p-5',
+                        'shadow-e1 hover:shadow-e2 hover:border-border-strong transition-all',
+                        'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-red focus-visible:ring-offset-2',
+                      )}
+                    >
+                      <div className="flex items-center gap-3 mb-3">
+                        <span className="w-10 h-10 rounded-md bg-surface-2 border border-hairline flex items-center justify-center shrink-0">
+                          {s.iconUrl ? (
+                            <img src={s.iconUrl} alt="" aria-hidden="true" className="w-5 h-5 object-contain" />
+                          ) : (
+                            <FileText className="w-5 h-5 text-brand-red" aria-hidden="true" />
+                          )}
+                        </span>
+                        <ChevronRight className="ml-auto w-4 h-4 text-ink-400" aria-hidden="true" />
+                      </div>
+                      <div className="text-[15px] font-semibold text-ink-900 leading-snug">
+                        {s.title}
+                      </div>
+                      {s.description && (
+                        <p className="mt-1 text-[13px] text-ink-500 line-clamp-2">
+                          {s.description}
+                        </p>
+                      )}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </section>
+        )}
+
+        {/* ───────────────────────── PHASE: OPTION ───────────────────────── */}
+        {phase === PHASE.OPTION && serviceObj && (
+          <section>
+            <header className="mb-6">
+              <h1 className="text-[22px] lg:text-[28px] font-bold tracking-[-0.015em] text-ink-900">
+                Which issue under <span className="text-brand-red">{serviceObj.title}</span>?
+              </h1>
+              <p className="mt-1 text-[14px] text-ink-500">
+                Choose the option that best describes your situation.
+              </p>
+            </header>
+
+            <ul className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+              {(serviceObj.options || []).map((opt, i) => (
+                <li key={opt.id}>
+                  <button
+                    type="button"
+                    onClick={() => pickOption(opt)}
+                    className={cn(
+                      'w-full text-left h-full bg-panel border border-hairline rounded-lg p-4 lg:p-5',
+                      'shadow-e1 hover:shadow-e2 hover:border-border-strong transition-all',
+                      'flex items-center gap-4',
+                      'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-red focus-visible:ring-offset-2',
+                    )}
+                  >
+                    <span className="w-10 h-10 rounded-md bg-surface-2 border border-hairline flex items-center justify-center shrink-0 text-[13px] font-semibold text-ink-700">
+                      {opt.iconUrl ? (
+                        <img src={opt.iconUrl} alt="" aria-hidden="true" className="w-5 h-5 object-contain" />
                       ) : (
-                        <div className="font-bold text-xl">{s.title?.charAt(0)}</div>
+                        i + 1
+                      )}
+                    </span>
+                    <div className="flex-1 min-w-0">
+                      <div className="text-[15px] font-semibold text-ink-900 leading-snug truncate">
+                        {opt.title}
+                      </div>
+                      {opt.description && (
+                        <p className="mt-0.5 text-[13px] text-ink-500 line-clamp-2">
+                          {opt.description}
+                        </p>
                       )}
                     </div>
-                    <span className={`text-[11px] text-center leading-tight ${activeCategoryPreview?.id === s.id ? 'font-bold' : 'font-medium'}`}>
-                      {s.title}
-                    </span>
+                    <ChevronRight className="w-4 h-4 text-ink-400 shrink-0" aria-hidden="true" />
                   </button>
-                ))}
+                </li>
+              ))}
+            </ul>
+
+            <div className="mt-8 flex">
+              <Button kind="ghost" iconLeft={<ArrowLeft className="w-4 h-4" />} onClick={goBackOneStep}>
+                Back to categories
+              </Button>
+            </div>
+          </section>
+        )}
+
+        {/* ───────────────────────── PHASE: CTA (url/pdf) ───────────────────────── */}
+        {phase === PHASE.CTA && optionObj && action && (
+          <section className="max-w-[640px] mx-auto">
+            <Card className="p-6 lg:p-8">
+              <div className="flex items-center gap-3 mb-4">
+                <span className="w-10 h-10 rounded-md bg-surface-2 border border-hairline flex items-center justify-center">
+                  {kind === 'pdf'
+                    ? <FileText className="w-5 h-5 text-brand-red" aria-hidden="true" />
+                    : <ExternalLink className="w-5 h-5 text-brand-red" aria-hidden="true" />}
+                </span>
+                <h2 className="text-[20px] font-semibold text-ink-900">
+                  {kind === 'pdf' ? 'Download document' : 'Open service portal'}
+                </h2>
               </div>
 
-              {activeCategoryPreview ? (
-                <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
-                  {/* Category Details Card */}
-                  <div className="xl:col-span-2 bg-white rounded-[20px] p-8 lg:p-10 border border-gray-200 shadow-[0_4px_20px_rgba(0,0,0,0.02)] relative overflow-hidden flex flex-col">
-                    <img src="/35df4c78-0f29-4db2-87df-8b48fc2965d1.png" alt="Map Watermark" className="absolute -right-20 -bottom-10 w-[500px] h-[500px] object-contain opacity-[0.03] pointer-events-none z-0" />
-                    
-                    <div className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-[#C8102E] text-white text-[10px] font-bold uppercase tracking-wider mb-6 self-start relative z-10 shadow-sm">
-                      <CheckCircle2 className="w-3.5 h-3.5" /> Most Frequent
-                    </div>
+              <p className="text-[14px] text-ink-700 leading-relaxed">
+                <strong className="text-ink-900">{optionObj.title}</strong> is handled by an
+                external government portal. We'll send you there in a new tab — no ticket
+                is created on the Mylapore Portal for this kind of request.
+              </p>
 
-                    <h3 className="text-2xl lg:text-[26px] font-bold text-[#C8102E] mb-4 relative z-10">{activeCategoryPreview.title}</h3>
-                    <p className="text-gray-500 text-[14px] leading-relaxed relative z-10 mb-10 max-w-[90%]">{activeCategoryPreview.description || 'Certificates, patta, relief and other documentation requests.'}</p>
-                    
-                    <div className="grid grid-cols-2 gap-y-5 gap-x-6 mb-12 relative z-10">
-                      {(activeCategoryPreview.options?.length > 0 ? activeCategoryPreview.options.slice(0, 4).map(o => o.title) : ['Income Certificate Issue', 'Patta Issue', 'Disaster Relief', 'Death / Birth Certificate']).map(item => (
-                        <div key={item} className="flex items-center gap-3 text-[13px] text-gray-700 font-medium">
-                          <div className="w-5 h-5 rounded-full bg-transparent border border-[#C8102E] flex items-center justify-center shrink-0">
-                            <CheckCircle2 className="w-3 h-3 text-[#C8102E]" />
-                          </div>
-                          <span className="line-clamp-1">{item}</span>
-                        </div>
-                      ))}
-                    </div>
-
-                    <div className="mt-auto relative z-10 self-start">
-                      <button onClick={() => pickService(activeCategoryPreview)}
-                              className="group relative overflow-hidden text-white px-8 py-4 rounded-2xl font-extrabold text-[13px] tracking-wide flex items-center justify-center gap-2.5 transition-all duration-300 hover:-translate-y-0.5 hover:shadow-[0_18px_36px_-10px_rgba(200,16,46,0.6)]"
-                              style={{
-                                background: 'linear-gradient(135deg, #C8102E 0%, #8B0000 60%, #5A0000 100%)',
-                                boxShadow: '0 10px 24px -8px rgba(200,16,46,0.5), inset 0 1px 0 rgba(255,255,255,0.18)',
-                              }}>
-                        <span className="absolute inset-0 opacity-0 group-hover:opacity-100 transition-opacity duration-500"
-                              style={{ background: 'linear-gradient(135deg, rgba(255,214,10,0.18) 0%, transparent 60%)' }} />
-                        <span className="relative">Proceed with {activeCategoryPreview.title}</span>
-                        <ArrowRight className="relative w-4 h-4 transition-transform duration-300 group-hover:translate-x-1" strokeWidth={2.6} />
-                      </button>
-                    </div>
-                  </div>
-                  
-                  {/* SLA Tracking Card */}
-                  <div className="bg-white rounded-[20px] p-6 lg:p-8 border border-gray-200 flex flex-col shadow-[0_4px_20px_rgba(0,0,0,0.02)]">
-                    {(() => {
-                      const slaMapping = {
-                        'Civic Works': { desc: 'Civic issues are typically acknowledged within 24 hours and resolved within 7 working days.', avg: '4.2 Days', percent: '60%' },
-                        'Revenue': { desc: 'Revenue documentation requests are acknowledged in 48 hours and resolved within 14 days.', avg: '10.5 Days', percent: '75%' },
-                        'Health': { desc: 'Health-related grievances are prioritized and typically resolved within 3 to 5 working days.', avg: '3.1 Days', percent: '45%' },
-                        'Education': { desc: 'Education requests are acknowledged within 48 hours and processed within 10 working days.', avg: '7.4 Days', percent: '70%' },
-                        'Ration': { desc: 'PDS and ration issues are fast-tracked for resolution within 2 to 4 working days.', avg: '2.8 Days', percent: '40%' },
-                        'Agriculture': { desc: 'Agricultural grievances are reviewed by the respective local officer within 5 working days.', avg: '5.5 Days', percent: '55%' },
-                        'Law & Order': { desc: 'Law & Order complaints are immediately routed to local stations with a 24-hour SLA.', avg: '1.2 Days', percent: '20%' },
-                        'Employment': { desc: 'Employment and job fair queries are processed in batches within 7 working days.', avg: '6.0 Days', percent: '80%' },
-                        'Personal Assistance': { desc: 'Personal petitions to the MLA are reviewed weekly and updated accordingly.', avg: '8.5 Days', percent: '65%' },
-                      }
-                      const activeSLA = slaMapping[activeCategoryPreview?.title] || { desc: 'Requests in this category are typically acknowledged within 48 hours and resolved within 7-10 days.', avg: '5.0 Days', percent: '50%' }
-                      
-                      return (
-                        <>
-                          <div>
-                            <div className="w-10 h-10 rounded-xl bg-transparent border border-gray-200 flex items-center justify-center mb-6">
-                              <Clock className="w-5 h-5 text-[#C8102E]" />
-                            </div>
-                            <h4 className="text-[16px] font-bold text-[#C8102E] mb-3">SLA Tracking</h4>
-                            <p className="text-[13px] text-gray-500 leading-relaxed transition-all duration-300">
-                              {activeSLA.desc}
-                            </p>
-                          </div>
-                          <div className="mt-auto pt-8">
-                            <div className="flex justify-between items-center mb-2">
-                              <span className="text-[10px] font-bold text-gray-500 uppercase tracking-widest">Avg. Resolution</span>
-                              <span className="text-[11px] font-bold text-[#C8102E] transition-all duration-300">{activeSLA.avg}</span>
-                            </div>
-                            <div className="w-full h-1.5 bg-gray-200 rounded-full overflow-hidden">
-                              <div className="h-full bg-[#C8102E] rounded-full transition-all duration-700 ease-out" style={{ width: activeSLA.percent }}></div>
-                            </div>
-                          </div>
-                        </>
-                      )
-                    })()}
-                  </div>
-                </div>
-              ) : null}
-
-              {/* Sub Cards visual decoration — dynamic per category */}
-              {(() => {
-                const categoryCards = {
-                  'Civic Works': [
-                    { img: 'https://images.unsplash.com/photo-1515162816999-a0c47dc192f7?auto=format&fit=crop&q=80&w=600', title: 'Roads & Transport', desc: 'Potholes, Signage, Lighting' },
-                    { img: 'https://images.unsplash.com/photo-1518173946687-a4c8892bbd9f?auto=format&fit=crop&q=80&w=600', title: 'Environment', desc: 'Parks, Waste, Pollution' },
-                    { img: 'https://images.unsplash.com/photo-1581094794329-c8112a89af12?auto=format&fit=crop&q=80&w=600', title: 'Utilities', desc: 'Water, Drainage, Sewage' },
-                  ],
-                  'Revenue': [
-                    { img: 'https://images.unsplash.com/photo-1554224155-6726b3ff858f?auto=format&fit=crop&q=80&w=600', title: 'Land Records', desc: 'Patta, Chitta, FMB' },
-                    { img: 'https://images.unsplash.com/photo-1450101499163-c8848c66ca85?auto=format&fit=crop&q=80&w=600', title: 'Certificates', desc: 'Income, Nativity, Community' },
-                    { img: 'https://images.unsplash.com/photo-1586769852044-692d6e3703f0?auto=format&fit=crop&q=80&w=600', title: 'Disaster Relief', desc: 'Flood, Fire, Compensation' },
-                  ],
-                  'Health': [
-                    { img: 'https://images.unsplash.com/photo-1519494026892-80bbd2d6fd0d?auto=format&fit=crop&q=80&w=600', title: 'Health', desc: 'Hospitals, Treatments, Consultations' },
-                    { img: 'https://images.unsplash.com/photo-1584515933487-779824d29309?auto=format&fit=crop&q=80&w=600', title: 'Vaccination', desc: 'Camps, Schedules, Records' },
-                    { img: 'https://images.unsplash.com/photo-1587745416684-47953f16f02f?auto=format&fit=crop&q=80&w=600', title: 'Basic medicine', desc: 'Basic Medicines, Prescriptions' },
-                    { img: 'https://images.unsplash.com/photo-1538108149393-fbbd81895907?auto=format&fit=crop&q=80&w=600', title: 'Tamilnadu camp & others', desc: 'Health Camps, Checkups' },
-                  ],
-                  'Education': [
-                    { img: 'https://images.unsplash.com/photo-1580582932707-520aed937b7b?auto=format&fit=crop&q=80&w=600', title: 'Schools', desc: 'Infrastructure, Teachers' },
-                    { img: 'https://images.unsplash.com/photo-1567521464027-f127ff144326?auto=format&fit=crop&q=80&w=600', title: 'Mid-Day Meals', desc: 'Quality, Supply, Nutrition' },
-                    { img: 'https://images.unsplash.com/photo-1517649763962-0c623066013b?auto=format&fit=crop&q=80&w=600', title: 'Sports & Arts', desc: 'Grounds, Equipment, Events' },
-                  ],
-                  'Ration': [
-                    { img: 'https://images.unsplash.com/photo-1586201375761-83865001e31c?auto=format&fit=crop&q=80&w=600', title: 'Ration Card', desc: 'New, Transfer, Correction' },
-                    { img: 'https://images.unsplash.com/photo-1595854341625-f33ee10dbf94?auto=format&fit=crop&q=80&w=600', title: 'Fair Price Shop', desc: 'Supply, Quality, Timing' },
-                    { img: 'https://images.unsplash.com/photo-1532629345422-7515f3d16bb6?auto=format&fit=crop&q=80&w=600', title: 'Pension', desc: 'Old Age, Widow, Disability' },
-                  ],
-                  'Agriculture': [
-                    { img: 'https://images.unsplash.com/photo-1625246333195-78d9c38ad449?auto=format&fit=crop&q=80&w=600', title: 'Crop Insurance', desc: 'Claims, Coverage, Premium' },
-                    { img: 'https://images.unsplash.com/photo-1574943320219-553eb213f72d?auto=format&fit=crop&q=80&w=600', title: 'Farm Loans', desc: 'Subsidies, Schemes, Relief' },
-                    { img: 'https://images.unsplash.com/photo-1464226184884-fa280b87c399?auto=format&fit=crop&q=80&w=600', title: 'Irrigation', desc: 'Canals, Borewells, Water' },
-                  ],
-                  'Law & Order': [
-                    { img: 'https://images.unsplash.com/photo-1589994965851-a8f479c573a9?auto=format&fit=crop&q=80&w=600', title: 'FIR & Complaints', desc: 'Filing, Follow-up, Status' },
-                    { img: 'https://images.unsplash.com/photo-1517048676732-d65bc937f952?auto=format&fit=crop&q=80&w=600', title: 'Legal Aid', desc: 'Free Counsel, Awareness' },
-                    { img: 'https://images.unsplash.com/photo-1557804506-669a67965ba0?auto=format&fit=crop&q=80&w=600', title: 'Public Safety', desc: 'Patrol, CCTV, Street Lights' },
-                  ],
-                  'Employment': [
-                    { img: 'https://images.unsplash.com/photo-1521737711867-e3b97375f902?auto=format&fit=crop&q=80&w=600', title: 'Job Fairs', desc: 'Events, Registration, Dates' },
-                    { img: 'https://images.unsplash.com/photo-1454165804606-c3d57bc86b40?auto=format&fit=crop&q=80&w=600', title: 'Skill Training', desc: 'Courses, MSME, Workshops' },
-                    { img: 'https://images.unsplash.com/photo-1507679799987-c73779587ccf?auto=format&fit=crop&q=80&w=600', title: 'EPF & Benefits', desc: 'Provident Fund, ESI, Claims' },
-                  ],
-                  'Personal Assistance': [
-                    { img: 'https://images.unsplash.com/photo-1577962917302-cd874c4e31d2?auto=format&fit=crop&q=80&w=600', title: 'MLA Petition', desc: 'Direct Appeals, Meetings' },
-                    { img: 'https://images.unsplash.com/photo-1469571486292-0ba58a3f068b?auto=format&fit=crop&q=80&w=600', title: 'Marriage & Family', desc: 'Disputes, Counselling, Aid' },
-                    { img: 'https://images.unsplash.com/photo-1473496169904-658ba7c44d8a?auto=format&fit=crop&q=80&w=600', title: 'Senior Citizens', desc: 'Old Age Home, Welfare, Care' },
-                  ],
-                }
-                const cards = categoryCards[activeCategoryPreview?.title] || categoryCards['Civic Works']
-                return (
-                  <div className="grid grid-cols-1 md:grid-cols-3 gap-5 mt-8">
-                    {cards.map((card, idx) => (
-                      <button key={idx} onClick={() => pickService(activeCategoryPreview)} className="h-44 rounded-2xl relative overflow-hidden flex items-end p-5 group border border-transparent shadow-sm">
-                        <img src={card.img} className="absolute inset-0 w-full h-full object-cover group-hover:scale-105 transition-transform duration-700" alt={card.title} />
-                        <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/20 to-transparent"></div>
-                        <div className="relative z-10 text-left w-full">
-                          <p className="text-white text-[15px] font-bold group-hover:text-gray-200 transition-colors">{card.title}</p>
-                          <p className="text-gray-300 text-[11px] mt-1 font-medium">{card.desc}</p>
-                        </div>
-                      </button>
-                    ))}
-                  </div>
-                )
-              })()}
-
-            </div>
-          )}
-
-          {/* ── PHASE: OPTION ── */}
-          {phase === PHASE.OPTION && serviceObj && (
-            <div className="animate-fade-in">
-              <div className="bg-[#edeef1] rounded-[24px] border border-gray-200 shadow-sm overflow-hidden max-w-4xl mx-auto">
-                {/* Header */}
-                <div className="bg-[#344966] px-8 py-5 flex items-center gap-4">
-                  <div className="w-12 h-12 rounded-xl bg-white/10 flex items-center justify-center shrink-0">
-                    {serviceObj.iconUrl ? (
-                      <img src={serviceObj.iconUrl} alt={serviceObj.title} className="w-6 h-6 object-contain brightness-0 invert opacity-90" />
-                    ) : (
-                      <FileText className="w-6 h-6 text-white/80" />
-                    )}
-                  </div>
-                  <div>
-                    <h2 className="text-[20px] font-bold text-white tracking-wide">Step 2: Select Issue Type</h2>
-                    <p className="text-white/70 text-[14px] mt-0.5">Choose the specific issue under <strong className="text-white/90 font-semibold">{serviceObj.title}</strong></p>
-                  </div>
-                </div>
-
-                <div className="p-6 lg:p-10">
-                  <div className="grid md:grid-cols-2 gap-4">
-                    {(serviceObj.options || []).map((opt, i) => (
-                      <button
-                        key={opt.id}
-                        onClick={() => pickOption(opt)}
-                        className="w-full text-left p-4 lg:p-5 border border-[#d1d5db] rounded-[16px] hover:border-[#344966] hover:bg-[#f8f9fa] bg-transparent transition-all flex items-center gap-4 group"
-                      >
-                        <div className="w-12 h-12 rounded-[12px] bg-[#e1e4e8] group-hover:bg-[#ebedf0] flex items-center justify-center overflow-hidden flex-shrink-0 transition-colors shadow-inner">
-                          {opt.iconUrl ? (
-                            <img src={opt.iconUrl} alt={opt.title} className="w-7 h-7 object-contain mix-blend-multiply" />
-                          ) : (
-                            <div className="text-[#344966] font-bold text-lg">{i + 1}</div>
-                          )}
-                        </div>
-                        <div className="flex-1 min-w-0">
-                          <div className="font-bold text-[15px] text-[#344966] mb-0.5 truncate">{opt.title}</div>
-                          <div className="text-[12px] text-gray-500 leading-relaxed truncate">{opt.description || 'Report an issue in this category'}</div>
-                        </div>
-                        <ChevronRight className="w-4 h-4 text-gray-400 group-hover:text-[#344966] group-hover:translate-x-0.5 transition-all flex-shrink-0" />
-                      </button>
-                    ))}
-                  </div>
-
-                  <div className="mt-8 pt-8 border-t border-[#d8dce2] flex">
-                    <button onClick={() => setPhase(PHASE.CATEGORY)} className="px-5 py-2.5 rounded-[12px] border border-[#d1d5db] bg-transparent hover:bg-white hover:border-[#c5c9d1] text-gray-600 font-semibold transition-all flex items-center gap-2 text-[13px]">
-                      <ArrowLeft className="w-4 h-4" /> Back to Categories
-                    </button>
-                  </div>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* ── PHASE: DETAILS ── (Stitch Split Layout) */}
-          {phase === PHASE.DETAILS && optionObj && (
-            <div className="animate-fade-in">
-              <h2 className="text-3xl font-bold text-[#8B0000] mb-2">Grievance Details</h2>
-              <p className="text-gray-600 text-[14px] mb-8">Provide accurate information about the issue you are facing to help our department resolve it efficiently. You can also pin the location on the map.</p>
-
-              <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
-                {/* LEFT: Form Card */}
-                <div className="xl:col-span-2 bg-white rounded-[20px] border border-gray-200 p-6 lg:p-8 shadow-[0_4px_16px_rgba(0,0,0,0.03)]">
-                  
-                  {/* Issue Title */}
-                  <div className="mb-6">
-                    <label className="block text-[10px] font-bold text-gray-500 uppercase tracking-widest mb-2">Issue Title</label>
-                    <input
-                      type="text"
-                      className="w-full border border-gray-200 rounded-xl px-5 py-3.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#8B0000] focus:border-transparent transition-all placeholder:text-gray-400"
-                      placeholder="e.g., Damaged streetlight on 5th Avenue"
-                      value={title}
-                      onChange={(e) => setTitle(e.target.value)}
-                    />
-                  </div>
-
-                  {/* Detailed Description */}
-                  <div className="mb-6">
-                    <label className="block text-[10px] font-bold text-gray-500 uppercase tracking-widest mb-2">Detailed Description</label>
-                    <textarea
-                      className="w-full border border-gray-200 rounded-xl p-5 h-32 resize-vertical text-sm focus:outline-none focus:ring-2 focus:ring-[#8B0000] focus:border-transparent transition-all placeholder:text-gray-400"
-                      placeholder="Describe the problem in detail, including how long it has been persistent..."
-                      value={description}
-                      onChange={(e) => e.target.value.length <= 500 && setDescription(e.target.value)}
-                    />
-                  </div>
-
-                  {/* Location Selection */}
-                  <div className="mb-6">
-                    <label className="block text-[10px] font-bold text-gray-500 uppercase tracking-widest mb-3">Location</label>
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-4">
-                      {/* District */}
-                      <div>
-                        <label className="block text-[10px] font-semibold text-gray-400 uppercase tracking-wider mb-1.5">District</label>
-                        <select
-                          className="w-full border border-gray-200 rounded-xl px-4 py-3.5 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-[#8B0000] focus:border-transparent transition-all text-[#C8102E] font-medium appearance-none cursor-pointer"
-                          value={location.district || ''}
-                          onChange={(e) => setLocation({ ...location, district: e.target.value, area: '', text: e.target.value, showAreaInput: false })}
-                        >
-                          <option value="">Select District</option>
-                          <option value="Chennai">Chennai</option>
-                        </select>
-                      </div>
-                      {/* Area / Locality */}
-                      <div>
-                        <label className="block text-[10px] font-semibold text-gray-400 uppercase tracking-wider mb-1.5">Area / Locality</label>
-                        {location.district === 'Chennai' && !location.showAreaInput ? (
-                          <select
-                            className="w-full border border-gray-200 rounded-xl px-4 py-3.5 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-[#8B0000] focus:border-transparent transition-all text-[#C8102E] font-medium appearance-none cursor-pointer"
-                            value={location.area || ''}
-                            onChange={(e) => {
-                              if (e.target.value === 'Other') {
-                                setLocation({ ...location, area: '', showAreaInput: true })
-                              } else {
-                                const areaCoords = { 'Mylapore': { lat: 13.0368, lng: 80.2676 } }
-                                const coords = areaCoords[e.target.value] || { lat: null, lng: null }
-                                setLocation({ ...location, area: e.target.value, text: `${e.target.value}, ${location.district}`, ...coords })
-                              }
-                            }}
-                          >
-                            <option value="">Select Area</option>
-                            <option value="Mylapore">Mylapore</option>
-                            <option value="T. Nagar">T. Nagar</option>
-                            <option value="Anna Nagar">Anna Nagar</option>
-                            <option value="Velachery">Velachery</option>
-                            <option value="Adyar">Adyar</option>
-                            <option value="Other">Other (Type manually)</option>
-                          </select>
-                        ) : (
-                          <input
-                            type="text"
-                            className="w-full border border-gray-200 rounded-xl px-4 py-3.5 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-[#8B0000] focus:border-transparent transition-all placeholder:text-gray-400"
-                            placeholder="e.g., Locality / Area"
-                            value={location.area || ''}
-                            onChange={(e) => setLocation({ ...location, area: e.target.value, text: `${e.target.value}, ${location.district || ''}` })}
-                          />
-                        )}
-                      </div>
-                    </div>
-
-                    {/* Street / Landmark */}
-                    <div className="mb-4">
-                      <label className="block text-[10px] font-semibold text-gray-400 uppercase tracking-wider mb-1.5">Street / Landmark</label>
-                      <div className="relative">
-                        <input
-                          type="text"
-                          className="w-full border border-gray-200 rounded-xl px-5 py-3.5 pr-12 text-sm focus:outline-none focus:ring-2 focus:ring-[#8B0000] focus:border-transparent transition-all placeholder:text-gray-400"
-                          placeholder="Street name, landmark, or house number"
-                          value={location.street || ''}
-                          onChange={(e) => {
-                            const street = e.target.value
-                            const base = location.area ? `${location.area}, ${location.district}` : location.district || ''
-                            setLocation({ ...location, street, text: street ? `${street}, ${base}` : base })
-                          }}
-                        />
-                        <button
-                          type="button"
-                          onClick={openGoogleMapsPicker}
-                          disabled={geoLoading}
-                          className="absolute right-3 top-1/2 -translate-y-1/2 w-8 h-8 rounded-full bg-[#8B0000] hover:bg-[#5A0000] flex items-center justify-center transition-colors shadow-sm disabled:opacity-50"
-                          title="Pick location on Google Maps"
-                        >
-                          {geoLoading ? (
-                            <Loader2 className="w-4 h-4 text-white animate-spin" />
-                          ) : (
-                            <MapPin className="w-4 h-4 text-white" />
-                          )}
-                        </button>
-                      </div>
-                      <p className="text-xs text-gray-500 mt-2 flex items-center gap-1">
-                        <MapPin className="w-3 h-3 text-[#8B0000]" />
-                        Click the map icon to select your exact location on Google Maps
-                      </p>
-                    </div>
-                  </div>
-
-                  {/* Action Buttons */}
-                  <div className="flex flex-col sm:flex-row gap-3 mt-8">
-                    <button onClick={() => setPhase(PHASE.OPTION)} className="flex items-center justify-center gap-2 px-8 py-3 rounded-full border-2 border-gray-200 text-gray-600 font-semibold hover:bg-gray-50 transition-colors text-sm">
-                      <ArrowLeft className="w-4 h-4" /> Back
-                    </button>
-                    <button
-                      onClick={() => setPhase(PHASE.CONFIRM)}
-                      disabled={!description.trim()}
-                      className="flex items-center justify-center gap-2 px-8 py-3 rounded-full bg-[#8B0000] hover:bg-[#122d55] text-white font-semibold transition-colors text-sm disabled:opacity-50 disabled:cursor-not-allowed shadow-sm"
-                    >
-                      Continue to Review <ArrowRight className="w-4 h-4" />
-                    </button>
-                  </div>
-                </div>
-
-                {/* RIGHT: Side Cards */}
-                <div className="flex flex-col gap-5">
-                  {/* Location Preview Card */}
-                  <div className="bg-gradient-to-br from-[#8B0000] to-[#C8102E] rounded-[20px] p-6 text-white shadow-[0_4px_16px_rgba(200,16,46,0.18)] overflow-hidden relative">
-                    <div className="flex items-center justify-between mb-4">
-                      <div className="flex items-center gap-2">
-                        <MapPin className="w-5 h-5" />
-                        <span className="text-[14px] font-bold">Location Preview</span>
-                      </div>
-                      <span className="text-[10px] font-semibold text-white/60 uppercase tracking-wider">Active Pin</span>
-                    </div>
-                    <div className="w-full h-72 rounded-2xl mb-4 overflow-hidden relative">
-                      <iframe
-                        key={`map-${location.lat}-${location.lng}`}
-                        title="Location Preview"
-                        className="w-full h-full border-0 rounded-2xl"
-                        src={`https://maps.google.com/maps?q=${location.lat != null ? location.lat : 13.0827},${location.lng != null ? location.lng : 80.2707}&z=16&output=embed`}
-                        allowFullScreen
-                      />
-                    </div>
-                    {location.text ? (
-                      <div className="bg-white/10 rounded-lg p-3 backdrop-blur-sm">
-                        <div className="text-[10px] font-bold uppercase tracking-widest text-white/60 mb-1.5">Selected Coordinates</div>
-                        <div className="text-[13px] font-medium leading-relaxed">{location.text}</div>
-                      </div>
-                    ) : (
-                      <div className="bg-white/5 rounded-lg p-3 border border-white/10">
-                        <p className="text-[11px] text-white/40 text-center">Enter an address to see the preview</p>
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Quality Check Card */}
-                  <div className="bg-white rounded-[20px] border border-gray-200 p-6 shadow-[0_4px_16px_rgba(0,0,0,0.03)]">
-                    <div className="flex items-start gap-3">
-                      <div className="w-10 h-10 rounded-full bg-blue-50 flex items-center justify-center shrink-0">
-                        <Info className="w-5 h-5 text-[#8B0000]" />
-                      </div>
-                      <div>
-                        <h4 className="text-[14px] font-bold text-[#8B0000] mb-1.5">Quality Check</h4>
-                        <p className="text-[13px] text-gray-600 leading-relaxed">Adding photos or clear landmarks significantly increases the speed of resolution for your grievance.</p>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* ── PHASE: LOCATION ── */}
-          {phase === PHASE.LOCATION && optionObj && (
-            <div className="animate-fade-in">
-              <h2 className="text-3xl font-bold text-[#8B0000] mb-2">Share Issue Location</h2>
-              <p className="text-gray-600 text-[14px] mb-8">Pin the location of the issue on the map or type the landmark/address so our team can reach the spot quickly.</p>
-
-              <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
-                {/* LEFT: Location Form */}
-                <div className="xl:col-span-2 bg-white rounded-[20px] border border-gray-200 p-6 lg:p-8 shadow-[0_4px_16px_rgba(0,0,0,0.03)]">
-                  <LocationPicker onLocationSelect={handleLocationSelect} />
-
-                  {location.text && (
-                    <div className="mt-6 bg-[#f4f6f8] border border-gray-200 rounded-2xl p-5 flex items-center gap-4">
-                      <div className="w-10 h-10 rounded-xl bg-[#8B0000]/10 flex items-center justify-center shrink-0">
-                        <MapPin className="w-5 h-5 text-[#8B0000]" />
-                      </div>
-                      <div>
-                        <div className="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-0.5">Selected Location</div>
-                        <span className="text-sm font-semibold text-[#C8102E]">{location.text}</span>
-                      </div>
-                    </div>
-                  )}
-
-                  <div className="flex flex-col sm:flex-row gap-3 mt-8">
-                    <button onClick={() => setPhase(PHASE.OPTION)} className="flex items-center justify-center gap-2 px-8 py-3 rounded-full border-2 border-gray-200 text-gray-600 font-semibold hover:bg-gray-50 transition-colors text-sm">
-                      <ArrowLeft className="w-4 h-4" /> Back
-                    </button>
-                    {kind === 'location_photos_ticket' ? (
-                      <button onClick={() => setPhase(PHASE.PHOTO)} disabled={!location.text} className="flex items-center justify-center gap-2 px-8 py-3 rounded-full bg-[#8B0000] hover:bg-[#122d55] text-white font-semibold transition-colors text-sm disabled:opacity-50 disabled:cursor-not-allowed shadow-sm">
-                        Continue to Photo <ArrowRight className="w-4 h-4" />
-                      </button>
-                    ) : (
-                      <button onClick={submitTicket} disabled={loading || !location.text} className="flex items-center justify-center gap-2 px-8 py-3 rounded-full bg-[#8B0000] hover:bg-[#122d55] text-white font-semibold transition-colors text-sm disabled:opacity-50 disabled:cursor-not-allowed shadow-sm">
-                        {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <><Send className="w-4 h-4" /> Submit Location</>}
-                      </button>
-                    )}
-                  </div>
-                </div>
-
-                {/* RIGHT: Side Cards */}
-                <div className="flex flex-col gap-5">
-                  {/* Location Preview Card */}
-                  <div className="bg-gradient-to-br from-[#8B0000] to-[#C8102E] rounded-[20px] p-6 text-white shadow-[0_4px_16px_rgba(200,16,46,0.18)] overflow-hidden relative">
-                    <div className="flex items-center justify-between mb-4">
-                      <div className="flex items-center gap-2">
-                        <MapPin className="w-5 h-5" />
-                        <span className="text-[14px] font-bold">Location Preview</span>
-                      </div>
-                      <span className="text-[10px] font-semibold text-white/60 uppercase tracking-wider">Active Pin</span>
-                    </div>
-                    <div className="w-full h-40 bg-white/10 rounded-2xl mb-4 flex items-center justify-center overflow-hidden relative">
-                      <div className="absolute inset-0 bg-[#8B0000]/30 flex items-center justify-center">
-                        <MapPin className="w-8 h-8 text-red-400 drop-shadow-lg" />
-                      </div>
-                    </div>
-                    {location.text && (
-                      <div className="bg-white/10 rounded-lg p-3 backdrop-blur-sm">
-                        <div className="text-[10px] font-bold uppercase tracking-widest text-white/60 mb-1.5">Selected Coordinates</div>
-                        <div className="text-[13px] font-medium leading-relaxed">{location.text}</div>
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Quality Check Card */}
-                  <div className="bg-white rounded-[20px] border border-gray-200 p-6 shadow-[0_4px_16px_rgba(0,0,0,0.03)]">
-                    <div className="flex items-start gap-3">
-                      <div className="w-10 h-10 rounded-full bg-blue-50 flex items-center justify-center shrink-0">
-                        <Info className="w-5 h-5 text-[#8B0000]" />
-                      </div>
-                      <div>
-                        <h4 className="text-[14px] font-bold text-[#8B0000] mb-1.5">Quick Tip</h4>
-                        <p className="text-[13px] text-gray-600 leading-relaxed">Use GPS for accurate pinning or type a nearby landmark. Precise locations help resolve issues 40% faster.</p>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* ── PHASE: PHOTO ── */}
-          {phase === PHASE.PHOTO && optionObj && (
-            <div className="animate-fade-in">
-              <div className="bg-white rounded-[20px] border border-gray-200 shadow-[0_4px_20px_rgba(0,0,0,0.02)] overflow-hidden max-w-4xl mx-auto">
-                <div className="bg-[#8B0000] px-8 py-5 flex items-center gap-4">
-                  <div className="w-10 h-10 rounded-xl bg-white/10 flex items-center justify-center shrink-0">
-                    <Camera className="w-5 h-5 text-white/80" />
-                  </div>
-                  <div>
-                    <h2 className="text-xl font-bold text-white">Attach Photo Evidence (Optional)</h2>
-                    <p className="text-white/60 text-sm mt-0.5">A photo helps the team verify the issue faster, but is not required</p>
-                  </div>
-                </div>
-
-                <div className="p-6 lg:p-8">
-                  {imagePreview ? (
-                    <div className="relative inline-block w-full mb-6">
-                      <img src={imagePreview} alt="Preview" className="w-full h-72 object-cover rounded-2xl border border-gray-200" />
-                      <button onClick={removeImage} className="absolute top-4 right-4 w-9 h-9 rounded-full bg-white/90 text-red-500 flex items-center justify-center shadow-md hover:bg-red-50 transition-colors">
-                        <X className="w-4 h-4" />
-                      </button>
-                    </div>
-                  ) : (
-                    <label className="flex flex-col items-center justify-center gap-3 border-2 border-dashed border-gray-200 rounded-2xl p-16 cursor-pointer hover:border-[#8B0000] hover:bg-[#f4f6f8] transition-all mb-6 group">
-                      <div className="w-14 h-14 rounded-2xl bg-[#f4f6f8] flex items-center justify-center group-hover:bg-[#8B0000]/10 transition-colors">
-                        <Upload className="w-6 h-6 text-gray-400 group-hover:text-[#8B0000] transition-colors" />
-                      </div>
-                      <span className="text-[15px] font-semibold text-gray-700">Click to upload evidence photo</span>
-                      <span className="text-xs text-gray-400">Optional. Max 10MB (JPG, PNG)</span>
-                      <input type="file" accept="image/*" className="hidden" onChange={handleImageChange} />
-                    </label>
-                  )}
-
-                  {submitError && (
-                    <div className="mb-6 flex items-start gap-2 bg-red-50 text-red-700 rounded-xl p-4 text-sm">
-                      <AlertCircle className="w-5 h-5 flex-shrink-0" />
-                      <div>{submitError}</div>
-                    </div>
-                  )}
-
-                  <div className="mt-8 pt-6 border-t border-gray-100 flex flex-col-reverse sm:flex-row gap-4">
-                    <button onClick={() => setPhase(PHASE.LOCATION)} className="px-6 py-3 rounded-xl border border-gray-200 text-gray-600 font-semibold hover:bg-gray-50 transition-colors flex items-center gap-2 text-sm">
-                      <ArrowLeft className="w-4 h-4" /> Back
-                    </button>
-                    <button onClick={submitTicket} disabled={loading} className="flex-1 bg-[#8B0000] hover:bg-[#122d55] text-white rounded-xl py-3 font-semibold flex items-center justify-center gap-2 transition-colors disabled:opacity-50 text-sm">
-                      {loading ? <Loader2 className="w-5 h-5 animate-spin" /> : <><Send className="w-4 h-4" /> Submit Grievance</>}
-                    </button>
-                  </div>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* ── PHASE: CONFIRM ── (Stitch Review & Submit) */}
-          {phase === PHASE.CONFIRM && (
-            <div className="animate-fade-in">
-              {grievanceId ? (
-                /* === SUCCESS STATE === */
-                <div className="w-full max-w-5xl mx-auto">
-                  <div className="bg-white rounded-lg shadow-[0_1px_3px_rgba(0,0,0,0.1)] overflow-hidden m-3 sm:m-4 md:m-6 lg:m-0">
-                    {/* HEADER SECTION - Simple and Professional */}
-                    <div className="bg-white px-4 sm:px-6 md:px-8 lg:px-12 py-6 sm:py-8 md:py-10 border-b-4 border-[#FF9933]">
-                      <div className="max-w-2xl">
-                        <div className="flex items-start sm:items-center gap-3 sm:gap-4 mb-4">
-                          <div className="w-10 sm:w-12 h-10 sm:h-12 bg-gradient-to-br from-[#FF9933] to-[#E67E22] rounded-full flex items-center justify-center flex-shrink-0">
-                            <CheckCircle2 className="w-5 sm:w-6 h-5 sm:h-6 text-white" />
-                          </div>
-                          <div className="flex-1">
-                            <div className="text-xs sm:text-[10px] font-bold text-gray-500 tracking-widest uppercase">Acknowledgment</div>
-                            <h1 className="text-xl sm:text-2xl md:text-[28px] lg:text-[32px] font-bold text-[#8B0000] leading-tight">Issue Successfully Submitted</h1>
-                          </div>
-                        </div>
-                        <p className="text-gray-600 text-sm sm:text-[13px] md:text-[14px] leading-relaxed">
-                          Your grievance has been successfully received and registered in the system. It has been forwarded to the concerned department for appropriate action and resolution.
-                        </p>
-                      </div>
-                    </div>
-
-                    {/* REFERENCE NUMBER - Prominent Display */}
-                    <div className="px-4 sm:px-6 md:px-8 lg:px-12 py-6 sm:py-8 md:py-10 bg-gradient-to-r from-[#f8fafc] to-white">
-                      <div className="text-xs font-bold text-gray-500 tracking-widest uppercase mb-2">Your Reference Number</div>
-                      <div className="text-3xl sm:text-4xl md:text-[48px] lg:text-[56px] font-black text-[#8B0000] font-mono tracking-wider mb-2 break-all">
-                        {grievanceId}
-                      </div>
-                      <p className="text-xs sm:text-sm md:text-[13px] text-gray-600">
-                        <strong>Keep this number safe.</strong> Use it to track your grievance status at any time. You can share it with others to inquire about your case.
-                      </p>
-                    </div>
-
-                    {/* MAIN CONTENT GRID */}
-                    <div className="px-4 sm:px-6 md:px-8 lg:px-12 py-6 sm:py-8 md:py-10 border-t border-gray-200">
-                      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 md:gap-8 mb-8 md:mb-10">
-                        {/* LEFT SIDE - Submitted Details */}
-                        <div className="lg:col-span-2">
-                          <h2 className="text-sm sm:text-base md:text-[16px] font-bold text-[#8B0000] uppercase tracking-wider mb-4 md:mb-6">Submitted Details</h2>
-
-                          {/* Details Grid */}
-                          <div className="grid grid-cols-1 md:grid-cols-2 gap-0 border border-gray-200 rounded-lg overflow-hidden bg-gray-50">
-                            {/* Department */}
-                            <div className="px-4 sm:px-5 md:px-6 py-3 sm:py-4 border-b md:border-b-0 md:border-r border-gray-200">
-                              <div className="text-xs font-bold text-gray-500 tracking-widest uppercase mb-1 sm:mb-2">Department / Category</div>
-                              <div className="text-sm sm:text-[15px] font-semibold text-[#8B0000] break-words">{serviceObj?.title}</div>
-                            </div>
-
-                            {/* Issue Type */}
-                            <div className="px-4 sm:px-5 md:px-6 py-3 sm:py-4 border-b md:border-b-0 border-gray-200">
-                              <div className="text-xs font-bold text-gray-500 tracking-widest uppercase mb-1 sm:mb-2">Issue Type</div>
-                              <div className="text-sm sm:text-[15px] font-semibold text-[#8B0000] break-words">{optionObj?.title}</div>
-                            </div>
-
-                            {/* Location */}
-                            {location.text && (
-                              <>
-                                <div className="px-4 sm:px-5 md:px-6 py-3 sm:py-4 md:col-span-2 border-t border-gray-200">
-                                  <div className="text-xs font-bold text-gray-500 tracking-widest uppercase mb-1 sm:mb-2">Location</div>
-                                  <div className="text-sm sm:text-[14px] font-medium text-gray-800 flex items-start gap-2">
-                                    <MapPin className="w-3 sm:w-4 h-3 sm:h-4 text-[#8B0000] mt-0.5 flex-shrink-0" />
-                                    <span className="break-words">{location.text}</span>
-                                  </div>
-                                </div>
-                              </>
-                            )}
-
-                            {/* Description */}
-                            {description && (
-                              <div className="px-4 sm:px-5 md:px-6 py-3 sm:py-4 md:col-span-2 border-t border-gray-200">
-                                <div className="text-xs font-bold text-gray-500 tracking-widest uppercase mb-1 sm:mb-2">Description</div>
-                                <p className="text-sm sm:text-[14px] text-gray-700 leading-relaxed line-clamp-3 break-words">{description}</p>
-                              </div>
-                            )}
-                          </div>
-                        </div>
-
-                        {/* RIGHT SIDE - SLA & Resolution Timeline */}
-                        <div className="lg:col-span-1">
-                          <h3 className="text-sm sm:text-base md:text-[16px] font-bold text-[#8B0000] uppercase tracking-wider mb-4 md:mb-6">What Happens Next</h3>
-
-                          <div className="space-y-3 md:space-y-4">
-                            {/* Step 1 */}
-                            <div className="border-l-4 border-[#FF9933] pl-3 sm:pl-4 pb-3 md:pb-4">
-                              <div className="text-xs font-bold text-[#FF9933] uppercase tracking-widest mb-1">Within 24 Hours</div>
-                              <p className="text-xs sm:text-[13px] font-semibold text-gray-800">Initial Acknowledgment</p>
-                              <p className="text-xs text-gray-600 mt-1">Your grievance will be acknowledged</p>
-                            </div>
-
-                            {/* Step 2 */}
-                            <div className="border-l-4 border-[#0EA5E9] pl-3 sm:pl-4 pb-3 md:pb-4">
-                              <div className="text-xs font-bold text-[#0EA5E9] uppercase tracking-widest mb-1">1-3 Days</div>
-                              <p className="text-xs sm:text-[13px] font-semibold text-gray-800">Officer Assignment</p>
-                              <p className="text-xs text-gray-600 mt-1">Routed to responsible officer</p>
-                            </div>
-
-                            {/* Step 3 */}
-                            <div className="border-l-4 border-[#22C55E] pl-3 sm:pl-4">
-                              <div className="text-xs font-bold text-[#22C55E] uppercase tracking-widest mb-1">7 Working Days</div>
-                              <p className="text-xs sm:text-[13px] font-semibold text-gray-800">Expected Resolution</p>
-                              <p className="text-xs text-gray-600 mt-1">Target completion timeframe</p>
-                            </div>
-                          </div>
-                        </div>
-                      </div>
-
-                      {/* IMPORTANT NOTICE */}
-                      <div className="bg-[#FEF08A] border-l-4 border-[#EAB308] rounded px-4 sm:px-5 md:px-6 py-3 sm:py-4 mb-6 md:mb-8">
-                        <p className="text-xs sm:text-sm md:text-[13px] text-gray-900">
-                          <strong>✓ Confirmation</strong> has been sent to your registered email and phone number. A tracking link has also been shared for real-time status updates.
-                        </p>
-                      </div>
-
-                      {/* ACTION BUTTONS */}
-                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 md:gap-4">
-                        <button
-                          onClick={() => navigate('/track')}
-                          className="px-4 sm:px-6 py-3 sm:py-3.5 md:py-4 bg-[#8B0000] hover:bg-[#122d55] text-white font-semibold rounded-lg transition-colors duration-200 flex items-center justify-center gap-2 shadow-sm hover:shadow-md text-xs sm:text-sm md:text-[14px]"
-                        >
-                          <Search className="w-3 sm:w-4 h-3 sm:h-4" />
-                          Track Status Now
-                        </button>
-                        <button
-                          onClick={() => {
-                            setPhase(PHASE.CATEGORY)
-                            setServiceObj(null); setOptionObj(null)
-                            resetDownstream()
-                          }}
-                          className="px-4 sm:px-6 py-3 sm:py-3.5 md:py-4 border-2 border-gray-300 text-[#8B0000] font-semibold rounded-lg hover:bg-gray-50 transition-colors duration-200 flex items-center justify-center gap-2 text-xs sm:text-sm md:text-[14px]"
-                        >
-                          <Plus className="w-3 sm:w-4 h-3 sm:h-4" />
-                          File New Grievance
-                        </button>
-                      </div>
-                    </div>
-
-                    {/* FOOTER - Important Info */}
-                    <div className="px-4 sm:px-6 md:px-8 lg:px-12 py-4 sm:py-6 md:py-8 bg-gray-50 border-t border-gray-200">
-                      <p className="text-xs sm:text-sm md:text-[12px] text-gray-600 leading-relaxed">
-                        You can access your grievance details anytime using your reference number. For assistance, contact the grievance help desk or email us. Your concern is important to us.
-                      </p>
-                    </div>
-                  </div>
-                </div>
-              ) : (
-                /* === REVIEW STATE (before submission) === */
-                <>
-                  <h2 className="text-3xl font-bold text-[#8B0000] mb-2">Review & Submit</h2>
-                  <p className="text-gray-600 text-[14px] mb-8">Please verify the information before submitting your grievance for resolution.</p>
-
-                  <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
-                    {/* LEFT: Summary + Attachments */}
-                    <div className="xl:col-span-2 flex flex-col gap-6">
-                      {/* Grievance Summary Card */}
-                      <div className="bg-white rounded-[20px] border border-gray-200 p-6 lg:p-8 shadow-[0_4px_16px_rgba(0,0,0,0.03)]">
-                        <div className="flex items-center justify-between mb-7">
-                          <h3 className="text-[18px] font-bold text-[#8B0000]">Grievance Summary</h3>
-                          <button onClick={() => setPhase(PHASE.DETAILS)} className="flex items-center gap-1.5 text-[13px] text-[#8B0000] font-semibold hover:text-[#122d55] transition-colors">
-                            <Edit2 className="w-4 h-4" /> Edit Details
-                          </button>
-                        </div>
-
-                        <div className="space-y-1">
-                          <div className="flex py-4 border-b border-gray-100">
-                            <span className="w-32 text-[13px] text-gray-500 shrink-0 font-medium">Department</span>
-                            <div className="flex items-center gap-2">
-                              {serviceObj?.iconUrl && <img src={serviceObj.iconUrl} alt="" className="w-5 h-5 object-contain" />}
-                              <span className="text-[13px] font-bold text-gray-900">{serviceObj?.title}</span>
-                            </div>
-                          </div>
-                          <div className="flex py-4 border-b border-gray-100">
-                            <span className="w-32 text-[13px] text-gray-500 shrink-0 font-medium">Issue Type</span>
-                            <span className="text-[13px] font-bold text-gray-900">{optionObj?.title}</span>
-                          </div>
-                          {title && (
-                            <div className="flex py-4 border-b border-gray-100">
-                              <span className="w-32 text-[13px] text-gray-500 shrink-0 font-medium">Issue Title</span>
-                              <span className="text-[13px] font-bold text-gray-900">{title}</span>
-                            </div>
-                          )}
-                          <div className="flex py-4 border-b border-gray-100">
-                            <span className="w-32 text-[13px] text-gray-500 shrink-0 font-medium">Description</span>
-                            <p className="text-[13px] text-gray-700 leading-relaxed">{description || 'No description provided.'}</p>
-                          </div>
-                          {location.text && (
-                            <div className="flex py-4">
-                              <span className="w-32 text-[13px] text-gray-500 shrink-0 font-medium">Location</span>
-                              <div className="flex items-start gap-2 flex-1 min-w-0">
-                                <MapPin className="w-4 h-4 text-red-500 shrink-0 mt-0.5" />
-                                <span className="text-[13px] text-gray-900 break-all leading-relaxed">{location.text}</span>
-                              </div>
-                            </div>
-                          )}
-                        </div>
-                      </div>
-
-                      {/* Attachments Card */}
-                      <div className="bg-white rounded-[20px] border border-gray-200 p-6 lg:p-8 shadow-[0_4px_16px_rgba(0,0,0,0.03)]">
-                        <h3 className="text-[18px] font-bold text-[#8B0000] mb-1">Attachments</h3>
-                        <p className="text-[12px] text-gray-500 mb-5">(Optional) Adding photos or videos helps resolve issues faster</p>
-                        {imagePreview ? (
-                          <div className="relative">
-                            <img src={imagePreview} alt="Attached" className="w-full h-48 object-cover rounded-2xl border border-gray-200" />
-                            <button onClick={removeImage} className="absolute top-3 right-3 w-8 h-8 rounded-full bg-white shadow-md text-red-500 flex items-center justify-center hover:bg-red-50 transition-all">
-                              <X className="w-4 h-4" />
-                            </button>
-                          </div>
-                        ) : (
-                          <>
-                            <label className="flex flex-col items-center justify-center gap-3 border-2 border-dashed border-gray-300 rounded-2xl py-12 cursor-pointer hover:border-[#8B0000] hover:bg-[#f4f6f8]/50 transition-all group">
-                              <Upload className="w-10 h-10 text-gray-300 group-hover:text-[#8B0000] transition-colors" />
-                              <span className="text-[14px] font-semibold text-gray-700">Click to upload photo or video</span>
-                              <span className="text-[12px] text-gray-500">JPG, PNG or MP4. Max 10MB</span>
-                              <input
-                                id="review-file-input"
-                                type="file"
-                                accept="image/*,video/*"
-                                className="hidden"
-                                onChange={handleImageChange}
-                              />
-                            </label>
-                            <button
-                              type="button"
-                              onClick={() => document.getElementById('review-file-input')?.click()}
-                              className="mt-4 px-6 py-2.5 rounded-full border border-gray-300 text-[13px] font-semibold text-gray-700 hover:bg-gray-50 hover:border-gray-400 transition-all"
-                            >
-                              Add Photos or Videos
-                            </button>
-                          </>
-                        )}
-                      </div>
-                    </div>
-
-                    {/* RIGHT: SLA + Submit + Did You Know */}
-                    <div className="flex flex-col gap-5">
-                      {/* SLA Information Card */}
-                      <div className="bg-white rounded-[20px] border border-gray-200 p-6 lg:p-7 shadow-[0_4px_16px_rgba(0,0,0,0.03)]">
-                        <div className="flex items-start gap-3 mb-5">
-                          <div className="w-10 h-10 rounded-full bg-blue-50 flex items-center justify-center shrink-0">
-                            <Info className="w-5 h-5 text-[#8B0000]" />
-                          </div>
-                          <p className="text-[13px] text-gray-500 leading-relaxed">Resolution tracking will be available immediately after submission.</p>
-                        </div>
-
-                        <h4 className="text-[15px] font-bold text-[#8B0000] mb-5">SLA Information</h4>
-                        <div className="space-y-4 mb-7">
-                          <div className="flex justify-between items-center">
-                            <span className="text-[13px] text-gray-600">Expected Acknowledgement</span>
-                            <span className="text-[15px] font-bold text-[#8B0000]">24 Hours</span>
-                          </div>
-                          <div className="flex justify-between items-center">
-                            <span className="text-[13px] text-gray-600">Resolution Target</span>
-                            <span className="text-[15px] font-bold text-[#8B0000]">7 Working Days</span>
-                          </div>
-                        </div>
-
-                        <label className="flex items-start gap-3 mb-7 cursor-pointer group">
-                          <input
-                            type="checkbox"
-                            checked={certified}
-                            onChange={(e) => setCertified(e.target.checked)}
-                            className="mt-1 w-4 h-4 rounded border border-gray-300 text-[#8B0000] focus:ring-2 focus:ring-[#8B0000] focus:ring-offset-1 accent-[#8B0000]"
-                          />
-                          <span className="text-[13px] text-gray-600 leading-relaxed group-hover:text-gray-700 transition-colors">I certify that the information provided is accurate and pertains to a genuine public grievance.</span>
-                        </label>
-
-                        {submitError && (
-                          <div className="mb-5 flex items-start gap-3 bg-red-50 text-red-700 rounded-xl p-4 text-[13px] border border-red-200">
-                            <AlertCircle className="w-5 h-5 flex-shrink-0 mt-0.5" />
-                            <div>{submitError}</div>
-                          </div>
-                        )}
-
-                        <button
-                          onClick={submitTicket}
-                          disabled={loading || !certified}
-                          className="w-full flex items-center justify-center gap-2 py-3.5 rounded-full bg-[#8B0000] hover:bg-[#122d55] text-white font-bold text-[14px] transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed shadow-[0_2px_8px_rgba(26,58,107,0.2)] hover:shadow-[0_4px_12px_rgba(26,58,107,0.3)] mb-3"
-                        >
-                          {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <>Submit Grievance <Send className="w-4 h-4" /></>}
-                        </button>
-                        <button onClick={() => setPhase(PHASE.DETAILS)} className="w-full flex items-center justify-center gap-2 py-3.5 rounded-full border-2 border-gray-200 text-gray-700 font-semibold text-[14px] hover:bg-gray-50 hover:border-gray-300 transition-all duration-200">
-                          <ArrowLeft className="w-4 h-4" /> Back to Details
-                        </button>
-                      </div>
-
-                      {/* Did You Know Card */}
-                      <div className="bg-gradient-to-br from-blue-50 to-indigo-50 rounded-[20px] border border-blue-200 p-6 shadow-[0_2px_8px_rgba(79,70,229,0.08)]">
-                        <div className="flex items-start gap-3">
-                          <div className="w-10 h-10 rounded-full bg-blue-100 flex items-center justify-center shrink-0">
-                            <Lightbulb className="w-5 h-5 text-blue-600" />
-                          </div>
-                          <div>
-                            <h4 className="text-[14px] font-bold text-blue-900 mb-1.5">Did you know?</h4>
-                            <p className="text-[13px] text-blue-800 leading-relaxed">Verified accounts receive status updates via SMS and WhatsApp automatically. You can also view real-time field visit reports in the 'My Requests' section.</p>
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                </>
-              )}
-            </div>
-          )}
-          
-          {/* ── PHASE: CTA ── */}
-          {phase === PHASE.CTA && optionObj && action && (
-            <div className="bg-white rounded-2xl border border-gray-200 shadow-[0_4px_20px_rgba(0,0,0,0.02)] p-6 lg:p-10 animate-fade-in max-w-2xl mx-auto">
-              <h2 className="text-2xl font-bold text-[#C8102E] mb-2">
-                {kind === 'pdf' ? '📄 Download Document' : '🔗 Open Service Portal'}
-              </h2>
-              <p className="text-sm text-gray-500 mb-4">{optionObj.title}</p>
-
-              {/* Contact Information */}
               {action.contact && (
-                <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 mb-6 flex items-start gap-3">
-                  <Phone className="w-5 h-5 text-blue-600 shrink-0 mt-0.5" />
+                <div className="mt-5 rounded-md bg-surface-2 border border-hairline p-3 flex items-start gap-2.5">
+                  <Phone className="w-4 h-4 text-ink-500 mt-0.5 shrink-0" aria-hidden="true" />
                   <div>
-                    <p className="text-xs font-semibold text-blue-900 uppercase tracking-wider mb-1">Contact</p>
-                    <p className="text-sm text-blue-800">{action.contact}</p>
+                    <div className="text-[11px] font-semibold tracking-wide text-ink-500 uppercase mb-0.5">Contact</div>
+                    <div className="text-[14px] text-ink-700">{action.contact}</div>
                   </div>
                 </div>
               )}
 
-              <div className="flex flex-col-reverse sm:flex-row gap-4 mt-8">
-                <button onClick={() => setPhase(PHASE.OPTION)} className="w-full sm:w-auto justify-center px-8 py-3.5 rounded-xl border border-gray-200 text-gray-600 font-bold hover:bg-gray-50 transition-colors">
+              <div className="mt-7 flex flex-col-reverse sm:flex-row sm:items-center sm:justify-between gap-3">
+                <Button kind="ghost" iconLeft={<ArrowLeft className="w-4 h-4" />} onClick={goBackOneStep}>
                   Back
-                </button>
-                <a
+                </Button>
+                <Button
+                  kind="primary"
+                  size="md"
+                  as="a"
                   href={kind === 'pdf' ? action.pdfUrl : action.url}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="flex-1 bg-[#C8102E] hover:bg-[#5A0000] text-white rounded-xl py-3.5 font-bold flex items-center justify-center gap-2 transition-colors"
+                  iconRight={<ExternalLink className="w-4 h-4" />}
                 >
-                  {kind === 'pdf' ? <><FileText className="w-4 h-4" /> Open PDF</> : <><ExternalLink className="w-4 h-4" /> {action.ctaLabel || 'Open Portal'}</>}
-                </a>
+                  {kind === 'pdf' ? 'Open document' : (action.ctaLabel || 'Open portal')}
+                </Button>
               </div>
-            </div>
-          )}
+            </Card>
+          </section>
+        )}
 
-        </div>
+        {/* ───────────────────────── PHASE: DETAILS ───────────────────────── */}
+        {phase === PHASE.DETAILS && optionObj && (
+          <section className="max-w-[760px] mx-auto">
+            <header className="mb-6">
+              <h1 className="text-[24px] lg:text-[28px] font-bold tracking-[-0.015em] text-ink-900">
+                Tell us what's happening
+              </h1>
+              <p className="mt-1 text-[14px] text-ink-500">
+                A short title and a clear description help the team triage faster.
+              </p>
+            </header>
+
+            <Card className="p-5 lg:p-7">
+              <div className="flex flex-col gap-5">
+                <TextField
+                  label="Short title"
+                  example="Damaged streetlight on N. Mada Street"
+                  optional
+                  value={title}
+                  onChange={(e) => setTitle(e.target.value.slice(0, 80))}
+                  help={`${title.length}/80`}
+                />
+
+                <div className="flex flex-col gap-2">
+                  <label htmlFor="g-desc" className="text-[12px] font-semibold tracking-wide text-ink-700">
+                    Description
+                  </label>
+                  <textarea
+                    id="g-desc"
+                    rows={5}
+                    maxLength={1500}
+                    placeholder="Describe the issue — what's wrong, how long it's been happening, any other details that help."
+                    value={description}
+                    onChange={(e) => setDescription(e.target.value)}
+                    aria-describedby="g-desc-help"
+                    className={cn(
+                      'w-full px-3 py-3 rounded-md bg-panel text-[15px] text-ink-900',
+                      'border border-hairline transition-colors',
+                      'placeholder:text-ink-400',
+                      'hover:border-border-strong',
+                      'focus:outline-none focus:border-brand-red focus:ring-4 focus:ring-brand-red/15',
+                      'resize-y min-h-[120px]',
+                    )}
+                  />
+                  <p id="g-desc-help" className="text-[13px] text-ink-500">
+                    {description.length}/1500 characters
+                  </p>
+                </div>
+
+                {/* Optional location capture */}
+                <div className="flex flex-col gap-2">
+                  <label className="text-[12px] font-semibold tracking-wide text-ink-700 flex items-center gap-2">
+                    <span>Location</span>
+                    <span className="font-normal text-ink-500">Optional</span>
+                  </label>
+                  <div className="flex items-stretch gap-2">
+                    <input
+                      type="text"
+                      placeholder="Street, landmark, or area"
+                      value={location.text || ''}
+                      onChange={(e) => setLocation({ ...location, text: e.target.value })}
+                      className={cn(
+                        'flex-1 h-11 sm:h-10 px-3 rounded-md bg-panel text-[15px] text-ink-900',
+                        'border border-hairline transition-colors',
+                        'placeholder:text-ink-400',
+                        'hover:border-border-strong',
+                        'focus:outline-none focus:border-brand-red focus:ring-4 focus:ring-brand-red/15',
+                      )}
+                    />
+                    <Button
+                      kind="secondary"
+                      size="md"
+                      onClick={fetchCurrentLocation}
+                      loading={geoLoading}
+                      iconLeft={<MapPin className="w-4 h-4" />}
+                    >
+                      <span className="hidden sm:inline">Use my location</span>
+                      <span className="sm:hidden">GPS</span>
+                    </Button>
+                  </div>
+                  <p className="text-[12px] text-ink-500">
+                    Sharing location helps the field team reach the right spot.
+                  </p>
+                </div>
+              </div>
+            </Card>
+
+            {/* Sticky bottom action */}
+            <div className="mt-6 flex flex-col-reverse sm:flex-row sm:items-center sm:justify-between gap-3">
+              <Button kind="ghost" iconLeft={<ArrowLeft className="w-4 h-4" />} onClick={goBackOneStep}>
+                Back
+              </Button>
+              <Button
+                kind="primary"
+                size="md"
+                disabled={!description.trim()}
+                onClick={() => setPhase(PHASE.CONFIRM)}
+                iconRight={<ArrowRight className="w-4 h-4" />}
+              >
+                Continue to review
+              </Button>
+            </div>
+          </section>
+        )}
+
+        {/* ───────────────────────── PHASE: LOCATION ───────────────────────── */}
+        {phase === PHASE.LOCATION && optionObj && (
+          <section className="max-w-[760px] mx-auto">
+            <header className="mb-6">
+              <h1 className="text-[24px] lg:text-[28px] font-bold tracking-[-0.015em] text-ink-900">
+                Where is the issue?
+              </h1>
+              <p className="mt-1 text-[14px] text-ink-500">
+                Use GPS, drop a pin, or type the address. Precise locations resolve faster.
+              </p>
+            </header>
+
+            <Card className="p-5 lg:p-7">
+              <LocationPicker onLocationSelect={handleLocationSelect} />
+
+              {location.text && (
+                <div className="mt-5 rounded-md bg-surface-2 border border-hairline p-3 flex items-start gap-2.5">
+                  <MapPin className="w-4 h-4 text-brand-red mt-0.5 shrink-0" aria-hidden="true" />
+                  <div className="min-w-0">
+                    <div className="text-[11px] font-semibold tracking-wide text-ink-500 uppercase mb-0.5">
+                      Selected
+                    </div>
+                    <div className="text-[14px] text-ink-700 break-words">{location.text}</div>
+                  </div>
+                </div>
+              )}
+            </Card>
+
+            <div className="mt-6 flex flex-col-reverse sm:flex-row sm:items-center sm:justify-between gap-3">
+              <Button kind="ghost" iconLeft={<ArrowLeft className="w-4 h-4" />} onClick={goBackOneStep}>
+                Back
+              </Button>
+              {kind === 'location_photos_ticket' ? (
+                <Button
+                  kind="primary"
+                  size="md"
+                  disabled={!location.text}
+                  onClick={() => setPhase(PHASE.PHOTO)}
+                  iconRight={<ArrowRight className="w-4 h-4" />}
+                >
+                  Continue to photo
+                </Button>
+              ) : (
+                <Button
+                  kind="primary"
+                  size="md"
+                  disabled={!location.text}
+                  loading={loading}
+                  onClick={submitTicket}
+                  iconRight={<Send className="w-4 h-4" />}
+                >
+                  {loading ? 'Submitting' : 'Submit'}
+                </Button>
+              )}
+            </div>
+          </section>
+        )}
+
+        {/* ───────────────────────── PHASE: PHOTO ───────────────────────── */}
+        {phase === PHASE.PHOTO && optionObj && (
+          <section className="max-w-[640px] mx-auto">
+            <header className="mb-6">
+              <h1 className="text-[24px] lg:text-[28px] font-bold tracking-[-0.015em] text-ink-900">
+                Add a photo
+              </h1>
+              <p className="mt-1 text-[14px] text-ink-500">
+                Optional — tickets with a photo are usually faster to verify. Avoid faces and licence plates if you can.
+              </p>
+            </header>
+
+            <Card className="p-5 lg:p-7">
+              {imagePreview ? (
+                <div className="relative">
+                  <img
+                    src={imagePreview}
+                    alt="Photo preview"
+                    className="w-full max-h-[360px] object-cover rounded-md border border-hairline"
+                  />
+                  <button
+                    type="button"
+                    onClick={removeImage}
+                    aria-label="Remove photo"
+                    className="absolute top-2 right-2 w-8 h-8 rounded-full bg-panel border border-hairline shadow-e1 flex items-center justify-center hover:bg-surface-2 transition-colors"
+                  >
+                    <X className="w-4 h-4 text-ink-700" aria-hidden="true" />
+                  </button>
+                </div>
+              ) : (
+                <label className="flex flex-col items-center justify-center gap-3 border-2 border-dashed border-hairline rounded-md py-12 px-6 cursor-pointer hover:border-border-strong hover:bg-surface-2 transition-colors">
+                  <Upload className="w-6 h-6 text-ink-500" aria-hidden="true" />
+                  <span className="text-[14px] font-semibold text-ink-900">
+                    Drag a photo here, or browse
+                  </span>
+                  <span className="text-[12px] text-ink-500">JPG / PNG · Max 10 MB</span>
+                  <input
+                    type="file"
+                    accept="image/*"
+                    className="sr-only"
+                    onChange={handleImageChange}
+                  />
+                </label>
+              )}
+
+              {submitError && (
+                <div role="alert" className="mt-4 rounded-md border border-status-danger/30 bg-status-danger/5 p-3 flex items-start gap-2 text-[13px] text-ink-700">
+                  <AlertCircle className="w-4 h-4 text-status-danger mt-0.5 shrink-0" aria-hidden="true" />
+                  <span>{submitError}</span>
+                </div>
+              )}
+            </Card>
+
+            <div className="mt-6 flex flex-col-reverse sm:flex-row sm:items-center sm:justify-between gap-3">
+              <Button kind="ghost" iconLeft={<ArrowLeft className="w-4 h-4" />} onClick={goBackOneStep}>
+                Back
+              </Button>
+              <Button
+                kind="primary"
+                size="md"
+                loading={loading}
+                onClick={submitTicket}
+                iconRight={<Send className="w-4 h-4" />}
+              >
+                {loading ? 'Submitting' : 'Submit grievance'}
+              </Button>
+            </div>
+          </section>
+        )}
+
+        {/* ───────────────────────── PHASE: CONFIRM ───────────────────────── */}
+        {phase === PHASE.CONFIRM && (
+          grievanceId
+            ? <SuccessView
+                grievanceId={grievanceId}
+                serviceObj={serviceObj}
+                optionObj={optionObj}
+                title={title}
+                description={description}
+                location={location}
+                imagePreview={imagePreview}
+                onTrack={() => navigate('/track')}
+                onNew={startOver}
+                userName={user?.name}
+              />
+            : <ReviewView
+                serviceObj={serviceObj}
+                optionObj={optionObj}
+                title={title}
+                description={description}
+                location={location}
+                imagePreview={imagePreview}
+                certified={certified}
+                setCertified={setCertified}
+                submitError={submitError}
+                loading={loading}
+                onEdit={() => setPhase(PHASE.DETAILS)}
+                onSubmit={submitTicket}
+                onPickPhoto={handleImageChange}
+                onRemovePhoto={removeImage}
+              />
+        )}
       </div>
+
+      {/* Confirm-discard dialog (replaces native confirms across the wizard) */}
+      <ConfirmDialog
+        open={!!confirm}
+        onClose={closeConfirm}
+        onConfirm={confirm?.onConfirm}
+        title={confirm?.title}
+        description={confirm?.description}
+        confirmLabel={confirm?.confirmLabel || 'Confirm'}
+        tone={confirm?.tone || 'primary'}
+      />
     </div>
   )
+}
 
+/* ──────────────────────────── sub-views ──────────────────────────── */
+
+function CatalogLoading() {
+  return (
+    <ul className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 lg:gap-4" aria-busy="true">
+      {[0, 1, 2, 3, 4, 5].map(i => (
+        <li key={i}>
+          <Card className="p-5">
+            <div className="w-10 h-10 rounded-md bg-surface-2 mb-4 animate-pulse" />
+            <div className="h-4 w-3/4 bg-surface-2 rounded mb-2 animate-pulse" />
+            <div className="h-3 w-1/2 bg-surface-2 rounded animate-pulse" />
+          </Card>
+        </li>
+      ))}
+    </ul>
+  )
+}
+
+function ReviewView({
+  serviceObj, optionObj, title, description, location, imagePreview,
+  certified, setCertified, submitError, loading,
+  onEdit, onSubmit, onPickPhoto, onRemovePhoto,
+}) {
+  return (
+    <section className="max-w-[760px] mx-auto">
+      <header className="mb-6">
+        <h1 className="text-[24px] lg:text-[28px] font-bold tracking-[-0.015em] text-ink-900">
+          Review and submit
+        </h1>
+        <p className="mt-1 text-[14px] text-ink-500">
+          Quick check before we send this to the MLA office.
+        </p>
+      </header>
+
+      {/* Summary */}
+      <Card className="p-5 lg:p-7">
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-[16px] font-semibold text-ink-900">Summary</h2>
+          <button
+            type="button"
+            onClick={onEdit}
+            className="inline-flex items-center gap-1 text-[13px] font-medium text-ink-700 hover:text-ink-900 rounded-md px-2 py-1 hover:bg-surface-2 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-red focus-visible:ring-offset-2"
+          >
+            <Edit2 className="w-3.5 h-3.5" aria-hidden="true" />
+            Edit
+          </button>
+        </div>
+
+        <dl className="divide-y divide-hairline text-[14px]">
+          <ReviewRow term="Category" desc={serviceObj?.title} />
+          <ReviewRow term="Issue"    desc={optionObj?.title} />
+          {title && <ReviewRow term="Title" desc={title} />}
+          <ReviewRow term="Description" desc={description || <span className="text-ink-400">No description</span>} multiline />
+          {location.text && <ReviewRow term="Location" desc={location.text} multiline />}
+        </dl>
+      </Card>
+
+      {/* Photo */}
+      <Card className="p-5 lg:p-7 mt-4">
+        <div className="flex items-center justify-between mb-3">
+          <div>
+            <h2 className="text-[16px] font-semibold text-ink-900">Photo</h2>
+            <p className="text-[12px] text-ink-500 mt-0.5">Optional — usually speeds up resolution.</p>
+          </div>
+        </div>
+        {imagePreview ? (
+          <div className="relative">
+            <img src={imagePreview} alt="Photo" className="w-full max-h-[280px] object-cover rounded-md border border-hairline" />
+            <button
+              type="button"
+              onClick={onRemovePhoto}
+              aria-label="Remove photo"
+              className="absolute top-2 right-2 w-8 h-8 rounded-full bg-panel border border-hairline shadow-e1 flex items-center justify-center hover:bg-surface-2 transition-colors"
+            >
+              <X className="w-4 h-4 text-ink-700" aria-hidden="true" />
+            </button>
+          </div>
+        ) : (
+          <label className="flex items-center gap-3 border border-dashed border-hairline rounded-md p-4 cursor-pointer hover:bg-surface-2 transition-colors">
+            <Camera className="w-5 h-5 text-ink-500" aria-hidden="true" />
+            <span className="text-[14px] text-ink-700">Add a photo</span>
+            <span className="text-[12px] text-ink-500 ml-auto">Max 10 MB</span>
+            <input type="file" accept="image/*" className="sr-only" onChange={onPickPhoto} />
+          </label>
+        )}
+      </Card>
+
+      {/* Process transparency */}
+      <Card className="p-5 lg:p-7 mt-4">
+        <div className="flex items-start gap-3">
+          <Info className="w-4 h-4 text-ink-500 mt-0.5 shrink-0" aria-hidden="true" />
+          <div className="text-[13px] text-ink-700 leading-relaxed">
+            <p className="font-semibold text-ink-900 mb-1">What happens next</p>
+            <p>
+              The MLA office reviews submissions within 24 hours and assigns a named owner.
+              You'll see every status change on the <strong>My Requests</strong> dashboard.
+            </p>
+          </div>
+        </div>
+      </Card>
+
+      {/* Certify + submit */}
+      <Card className="p-5 lg:p-7 mt-4">
+        <label className="flex items-start gap-3 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={certified}
+            onChange={(e) => setCertified(e.target.checked)}
+            className="mt-0.5 w-4 h-4 rounded border border-border-strong text-brand-red focus:ring-2 focus:ring-brand-red/30"
+          />
+          <span className="text-[13px] text-ink-700 leading-relaxed">
+            I certify that the information above is accurate and pertains to a genuine public grievance.
+          </span>
+        </label>
+
+        {submitError && (
+          <div role="alert" className="mt-4 rounded-md border border-status-danger/30 bg-status-danger/5 p-3 flex items-start gap-2 text-[13px] text-ink-700">
+            <AlertCircle className="w-4 h-4 text-status-danger mt-0.5 shrink-0" aria-hidden="true" />
+            <span>{submitError}</span>
+          </div>
+        )}
+
+        <div className="mt-5 flex flex-col-reverse sm:flex-row sm:items-center sm:justify-end sm:gap-3 gap-3">
+          <Button kind="ghost" onClick={onEdit}>
+            Back to details
+          </Button>
+          <Button
+            kind="primary"
+            size="md"
+            disabled={!certified}
+            loading={loading}
+            onClick={onSubmit}
+            iconRight={<Send className="w-4 h-4" />}
+          >
+            {loading ? 'Submitting' : 'Submit grievance'}
+          </Button>
+        </div>
+      </Card>
+    </section>
+  )
+}
+
+function ReviewRow({ term, desc, multiline }) {
+  return (
+    <div className="flex flex-col sm:flex-row sm:gap-4 py-3 first:pt-0 last:pb-0">
+      <dt className="sm:w-32 text-ink-500 shrink-0 text-[13px]">{term}</dt>
+      <dd className={cn('text-ink-900 flex-1 min-w-0', multiline && 'whitespace-pre-line break-words')}>
+        {desc}
+      </dd>
+    </div>
+  )
+}
+
+function SuccessView({
+  grievanceId, serviceObj, optionObj, title, description, location,
+  imagePreview, onTrack, onNew, userName,
+}) {
+  return (
+    <section className="max-w-[760px] mx-auto">
+      <Card className="p-6 lg:p-8">
+        {/* Acknowledge the user, not the institution (outputs/02 P3) */}
+        <div className="flex items-start gap-3 mb-6">
+          <span className="w-10 h-10 rounded-full bg-status-success/10 flex items-center justify-center shrink-0">
+            <CheckCircle2 className="w-5 h-5 text-status-success" aria-hidden="true" />
+          </span>
+          <div>
+            <p className="text-[12px] font-semibold tracking-wide text-ink-500 uppercase mb-1">
+              Submitted
+            </p>
+            <h1 className="text-[22px] lg:text-[26px] font-bold tracking-[-0.015em] text-ink-900 leading-tight">
+              {userName ? `Thanks, ${userName}.` : 'Thanks.'}{' '}
+              <span className="font-medium text-ink-700">
+                Your complaint about <strong className="text-ink-900">{optionObj?.title || 'this issue'}</strong> is now with the MLA's office.
+              </span>
+            </h1>
+          </div>
+        </div>
+
+        {/* Reference */}
+        <div className="rounded-md bg-surface-2 border border-hairline p-4 mb-6">
+          <div className="text-[11px] font-semibold tracking-wide text-ink-500 uppercase mb-1">
+            Your reference
+          </div>
+          <div className="font-mono text-[20px] lg:text-[24px] font-semibold text-ink-900 break-all select-all">
+            {grievanceId}
+          </div>
+          <p className="mt-2 text-[13px] text-ink-500">
+            Save this reference. You'll see live status on the My Requests page.
+          </p>
+        </div>
+
+        {/* Submitted details */}
+        <h2 className="text-[14px] font-semibold text-ink-700 mb-3">Submitted details</h2>
+        <dl className="divide-y divide-hairline text-[13px] mb-6">
+          <ReviewRow term="Category" desc={serviceObj?.title} />
+          <ReviewRow term="Issue"    desc={optionObj?.title} />
+          {title && <ReviewRow term="Title" desc={title} />}
+          {description && <ReviewRow term="Description" desc={description} multiline />}
+          {location.text && <ReviewRow term="Location" desc={location.text} multiline />}
+        </dl>
+
+        {/* What's next timeline */}
+        <h2 className="text-[14px] font-semibold text-ink-700 mb-3">What happens next</h2>
+        <ol className="space-y-3 text-[13px] mb-7">
+          <TimelineStep n="1" title="Reviewed within 24 hours" body="A team at the MLA office reads every submission before it's routed." />
+          <TimelineStep n="2" title="Assigned to a person" body="You'll see who is responsible for resolving it." />
+          <TimelineStep n="3" title="Closed with a note" body="When the work is done you'll see what was done, by whom, and when." />
+        </ol>
+
+        {/* Actions */}
+        <div className="flex flex-col-reverse sm:flex-row sm:items-center sm:justify-between gap-3">
+          <Button kind="secondary" iconLeft={<Plus className="w-4 h-4" />} onClick={onNew}>
+            File another
+          </Button>
+          <Button kind="primary" iconLeft={<Search className="w-4 h-4" />} onClick={onTrack}>
+            Track my requests
+          </Button>
+        </div>
+      </Card>
+    </section>
+  )
+}
+
+function TimelineStep({ n, title, body }) {
+  return (
+    <li className="flex items-start gap-3">
+      <span className="w-6 h-6 rounded-full bg-brand-red/10 text-brand-red text-[11px] font-bold flex items-center justify-center shrink-0 mt-0.5">
+        {n}
+      </span>
+      <div>
+        <div className="font-semibold text-ink-900">{title}</div>
+        <p className="text-ink-500 leading-relaxed">{body}</p>
+      </div>
+    </li>
+  )
 }

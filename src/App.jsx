@@ -9,6 +9,7 @@ import RegisterPage from './pages/RegisterPage'
 import GrievanceHome from './pages/GrievanceHome'
 import MyGrievances from './pages/MyGrievances'
 import TrackStatus from './pages/TrackStatus'
+import AboutTvk from './pages/AboutTvk'
 
 /* ─── route gates ─────────────────────────────────────────────────── */
 
@@ -35,8 +36,8 @@ function GuestOnly({ children }) {
 
 function FullPageSpinner() {
   return (
-    <div className="min-h-screen flex items-center justify-center bg-white">
-      <div className="h-8 w-8 rounded-full border-2 border-navy/20 border-t-navy animate-spin" />
+    <div className="min-h-screen flex items-center justify-center bg-surface">
+      <div className="h-8 w-8 rounded-full border-2 border-hairline border-t-brand-red animate-spin" />
     </div>
   )
 }
@@ -49,6 +50,7 @@ export default function App() {
       <Routes>
         <Route element={<Layout />}>
           <Route path="/" element={<LandingPage />} />
+          <Route path="/about-tvk" element={<AboutTvk />} />
 
           <Route path="/login"    element={<GuestOnly><LoginPage    /></GuestOnly>} />
           <Route path="/register" element={<GuestOnly><RegisterPage /></GuestOnly>} />

@@ -19,11 +19,24 @@
   }
 
   body {
-    @apply bg-white text-gray-900 font-sans min-h-screen;
+    @apply bg-surface text-ink-900 font-sans min-h-screen;
     overflow-x: hidden;
-    font-size: 1.0625rem;       /* 17px — readable for elderly/rural users */
-    line-height: 1.65;
-    letter-spacing: -0.005em;
+    font-size: 0.9375rem;       /* 15px body — per outputs/03 typography scale */
+    line-height: 1.55;
+    letter-spacing: 0;
+  }
+
+  /* Numerics align across counters / IDs / timestamps. */
+  body { font-variant-numeric: tabular-nums; }
+
+  /* Honour reduced motion globally. */
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      animation-duration: 0.001ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.001ms !important;
+      scroll-behavior: auto !important;
+    }
   }
 
   /* Display headings use Poppins for a confident political-campaign feel */
@@ -337,34 +350,6 @@ html.lenis, html.lenis body { height: auto; }
   --tvk-black: #0A0A0A;
 }
 
-/* Animated TVK gradient backdrop */
-.tvk-bg {
-  background:
-    radial-gradient(1200px 600px at 15% 0%, rgba(255,204,0,0.18) 0%, transparent 60%),
-    radial-gradient(900px 500px at 100% 100%, rgba(255,140,0,0.15) 0%, transparent 60%),
-    linear-gradient(135deg, #5A0000 0%, #8B0000 35%, #C8102E 70%, #8B0000 100%);
-}
-.tvk-bg-dark {
-  background:
-    radial-gradient(800px 400px at 50% 0%, rgba(200,16,46,0.35) 0%, transparent 60%),
-    linear-gradient(180deg, #0A0A0A 0%, #1A0505 50%, #0A0A0A 100%);
-}
-
-/* Animated mesh blobs */
-@keyframes blobFloat {
-  0%, 100% { transform: translate(0,0) scale(1); }
-  33%      { transform: translate(30px,-20px) scale(1.05); }
-  66%      { transform: translate(-20px,25px) scale(0.95); }
-}
-.tvk-blob {
-  position: absolute;
-  border-radius: 9999px;
-  filter: blur(60px);
-  opacity: 0.5;
-  animation: blobFloat 14s ease-in-out infinite;
-  pointer-events: none;
-}
-
 /* Flame pulse */
 @keyframes flamePulse {
   0%, 100% { transform: scale(1) rotate(-1deg); filter: drop-shadow(0 0 12px rgba(255,204,0,0.4)); }
@@ -477,37 +462,6 @@ html.lenis, html.lenis body { height: auto; }
 .rv.rv-fade { transform: none; filter: blur(8px); }
 .rv.rv-fade.shown { filter: none; }
 
-/* ===== Concrete TVK CTA presets used across the site ===== */
-.tvk-cta-primary {
-  background: linear-gradient(135deg, #FFD60A 0%, #FF8C00 60%, #FF6B00 100%);
-  color: #0A0A0A;
-  box-shadow:
-    0 10px 30px -8px rgba(255, 140, 0, 0.55),
-    inset 0 1px 0 rgba(255,255,255,0.4);
-  border: 1px solid rgba(255, 214, 10, 0.5);
-}
-.tvk-cta-primary:hover { filter: brightness(1.05) saturate(1.05); }
-
-.tvk-cta-ghost {
-  background: rgba(255,255,255,0.07);
-  color: #ffffff;
-  border: 1.5px solid rgba(255, 214, 10, 0.45);
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
-}
-.tvk-cta-ghost:hover {
-  background: rgba(255, 214, 10, 0.12);
-  border-color: rgba(255, 214, 10, 0.85);
-}
-
-/* Solid red primary used outside the dark hero */
-.tvk-cta-red {
-  background: linear-gradient(135deg, #C8102E 0%, #8B0000 100%);
-  color: #ffffff;
-  box-shadow: 0 10px 26px -8px rgba(200, 16, 46, 0.5), inset 0 1px 0 rgba(255,255,255,0.18);
-}
-.tvk-cta-red:hover { filter: brightness(1.06); }
-
 /* ===== Floating "trust" cards used in hero ===== */
 .tvk-trust-card {
   position: relative;
@@ -539,37 +493,6 @@ html.lenis, html.lenis body { height: auto; }
   -webkit-mask-composite: xor;
           mask-composite: exclude;
   pointer-events: none;
-}
-
-/* ===== Glass navbar ===== */
-.tvk-nav {
-  background: rgba(255, 255, 255, 0.72);
-  backdrop-filter: saturate(1.6) blur(16px);
-  -webkit-backdrop-filter: saturate(1.6) blur(16px);
-  border-bottom: 1px solid rgba(200, 16, 46, 0.08);
-}
-.tvk-nav.scrolled {
-  background: rgba(255, 255, 255, 0.92);
-  border-bottom-color: rgba(200, 16, 46, 0.18);
-  box-shadow: 0 6px 24px -10px rgba(200, 16, 46, 0.12);
-}
-.tvk-nav-link {
-  position: relative;
-  padding: 0.55rem 0.95rem;
-  border-radius: 0.75rem;
-  font-weight: 600;
-  font-size: 0.9rem;
-  color: #1E2A44;
-  display: inline-flex;
-  align-items: center;
-  gap: 0.4rem;
-  transition: color .2s ease, background .2s ease;
-}
-.tvk-nav-link:hover { color: #C8102E; background: rgba(200,16,46,0.06); }
-.tvk-nav-link.active {
-  color: #ffffff;
-  background: linear-gradient(135deg, #C8102E 0%, #8B0000 100%);
-  box-shadow: 0 6px 18px -6px rgba(200,16,46,0.45);
 }
 
 /* ===== Scroll progress bar (top of page) ===== */
@@ -978,7 +901,7 @@ a, [role="button"] {
 
 /* Disable smooth scrolling for users who prefer reduced motion */
 @media (prefers-reduced-motion: reduce) {
-  .tvk-flame, .tvk-blob, .tvk-grad-text, .tvk-grad-text-red, .marquee, .dot-pulse { animation: none !important; }
+  .tvk-flame, .tvk-grad-text, .tvk-grad-text-red, .marquee, .dot-pulse { animation: none !important; }
   .tvk-leader-card { transition: none !important; }
 }
 

@@ -1,332 +1,466 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { MapPin, Clock, MessageSquare, Plus, Search, User, ShieldAlert, CheckCircle2, PhoneCall, ArrowRight, Info, Filter } from 'lucide-react'
+import {
+  Plus, MapPin, Clock, Activity, CheckCircle2, MessageSquare,
+  RefreshCw, ChevronDown, FileText,
+} from 'lucide-react'
 import api from '../lib/api'
 import { useAuth } from '../lib/auth'
+import { Button, Card, StatusChip, EmptyState, cn } from '../components/ui'
 
 /**
- * Lists every ServiceRequest filed by the current user — both the ones raised
- * here on the web and the ones raised earlier through the WhatsApp bot, since
- * the backend keys grievances by phone and our JWT carries that phone.
+ * My Requests — citizen dashboard.
+ * Spec: outputs/04 → Dashboard Card Changes + Sidebar Changes
+ *       outputs/02 → D1 (action strip) + D2 (30s polling, visibility-aware)
+ *                  + D3 (what's-next per ticket) + D4 (mobile pill row)
  */
+const POLL_VISIBLE_MS = 30_000
 
-const STATUS_LABELS = {
-  pending:    { label: 'Open',        cls: 'bg-orange-100 text-orange-700',  bar: 'bg-saffron',    pct: '12%', icon: '🔴' },
-  accepted:   { label: 'Accepted',    cls: 'bg-blue-100 text-blue-700',      bar: 'bg-tvk-blue',   pct: '30%', icon: '🔵' },
-  processing: { label: 'In Progress', cls: 'bg-blue-100 text-blue-700',      bar: 'bg-tvk-blue',   pct: '55%', icon: '🔵' },
-  completed:  { label: 'Resolved',    cls: 'bg-green-200 text-green-800',    bar: 'bg-tvk-green',  pct: '100%',icon: '✅' },
-  rejected:   { label: 'Rejected',    cls: 'bg-red-100 text-red-700',        bar: 'bg-red-500',    pct: '100%',icon: '⛔' },
+const FILTERS = [
+  { id: 'all',     label: 'All' },
+  { id: 'open',    label: 'Open' },
+  { id: 'active',  label: 'Active' },
+  { id: 'closed',  label: 'Closed' },
+]
+
+function bucket(status) {
+  if (status === 'pending') return 'open'
+  if (status === 'accepted' || status === 'processing') return 'active'
+  if (status === 'completed' || status === 'rejected') return 'closed'
+  return 'open'
 }
 
 function formatDate(d) {
   if (!d) return ''
-  return new Date(d).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })
+  return new Date(d).toLocaleDateString('en-IN', {
+    day: '2-digit', month: 'short', year: 'numeric',
+  })
+}
+
+function relTime(d) {
+  if (!d) return ''
+  const diff = Date.now() - new Date(d).getTime()
+  const m = Math.floor(diff / 60000)
+  if (m < 1)  return 'just now'
+  if (m < 60) return `${m} min ago`
+  const h = Math.floor(m / 60)
+  if (h < 24) return `${h} hr ago`
+  const days = Math.floor(h / 24)
+  if (days < 7) return `${days} day${days > 1 ? 's' : ''} ago`
+  return formatDate(d)
+}
+
+/** Derive a one-line "what's next" from status + presence of MLA notes. */
+function whatsNext(g) {
+  switch (g.status) {
+    case 'pending':
+      return 'Under review by the MLA office.'
+    case 'accepted':
+      return 'Accepted. Awaiting assignment to a field team.'
+    case 'processing':
+      return 'In progress. The assigned team is working on it.'
+    case 'completed':
+      return g.notes
+        ? 'Resolved. Read the closing note below.'
+        : 'Resolved.'
+    case 'rejected':
+      return g.notes
+        ? 'Closed without action. Read the reason below.'
+        : 'Closed without action.'
+    default:
+      return 'Status unknown.'
+  }
 }
 
 export default function MyGrievances() {
   const { user } = useAuth()
   const navigate = useNavigate()
   const [requests, setRequests] = useState([])
-  const [loading, setLoading] = useState(true)
-  const [filterStatus, setFilterStatus] = useState('all')
+  const [loading, setLoading]   = useState(true)
+  const [filter, setFilter]     = useState('all')
+  const [showClosed, setShowClosed] = useState(false)
+  const [lastFetched, setLastFetched] = useState(null)
 
-  const filteredRequests = filterStatus === 'all'
-    ? requests
-    : requests.filter(r => r.status === filterStatus)
-
+  // Fetch + visibility-aware polling.
   useEffect(() => {
     let cancelled = false
-    const fetchRequests = () => {
-      api.get('/portal/grievances')
-        .then((r) => { if (!cancelled) setRequests(Array.isArray(r.data?.requests) ? r.data.requests : []) })
-        .catch(() => {})
-        .finally(() => { if (!cancelled) setLoading(false) })
+    let interval
+
+    async function fetchRequests() {
+      try {
+        const r = await api.get('/portal/grievances')
+        if (cancelled) return
+        setRequests(Array.isArray(r.data?.requests) ? r.data.requests : [])
+        setLastFetched(new Date())
+      } catch {
+        /* keep prior state on transient failure */
+      } finally {
+        if (!cancelled) setLoading(false)
+      }
     }
 
-    setLoading(true)
     fetchRequests()
+    interval = setInterval(() => {
+      if (document.visibilityState === 'visible') fetchRequests()
+    }, POLL_VISIBLE_MS)
 
-    // Real-time polling every 5 seconds
-    const interval = setInterval(fetchRequests, 5000)
+    function onVisible() {
+      if (document.visibilityState === 'visible') fetchRequests()
+    }
+    document.addEventListener('visibilitychange', onVisible)
 
     return () => {
       cancelled = true
       clearInterval(interval)
+      document.removeEventListener('visibilitychange', onVisible)
     }
   }, [])
 
-  const resolvedCount = requests.filter(r => r.status === 'completed').length;
-  const pendingCount = requests.length - resolvedCount;
+  // Buckets for the action strip + counts.
+  const grouped = useMemo(() => {
+    const out = { open: [], active: [], closed: [], awaiting: [] }
+    for (const g of requests) {
+      const b = bucket(g.status)
+      out[b].push(g)
+      // crude "awaiting you" heuristic: status pending + > 3 days old
+      if (b === 'open') {
+        const ageDays = (Date.now() - new Date(g.createdAt).getTime()) / 86_400_000
+        if (ageDays > 3) out.awaiting.push(g)
+      }
+    }
+    return out
+  }, [requests])
+
+  const counts = {
+    all:    requests.length,
+    open:   grouped.open.length,
+    active: grouped.active.length,
+    closed: grouped.closed.length,
+  }
+
+  const filtered = useMemo(() => {
+    if (filter === 'all')    return requests.filter(r => bucket(r.status) !== 'closed')
+    if (filter === 'closed') return grouped.closed
+    return grouped[filter] || []
+  }, [filter, requests, grouped])
+
+  function refresh() {
+    setLoading(true)
+    api.get('/portal/grievances')
+      .then(r => setRequests(Array.isArray(r.data?.requests) ? r.data.requests : []))
+      .catch(() => {})
+      .finally(() => { setLoading(false); setLastFetched(new Date()) })
+  }
 
   return (
-    <div className="flex min-h-[calc(100vh-80px)] flex-col lg:flex-row bg-[#f4f6f8]">
-      {/* ── LEFT SIDEBAR (Categories Filter) ── */}
-      <div className="hidden lg:flex flex-col w-[260px] xl:w-[280px] shrink-0 bg-[#f0f2f5]">
-        <div className="px-4 md:px-5 py-3 md:py-4 bg-gray-200">
-          <h3 className="text-[10px] md:text-[11px] font-bold text-gray-600 tracking-widest uppercase">Filter by Status</h3>
-        </div>
+    <div className="bg-surface min-h-[calc(100vh-3.5rem)] lg:min-h-[calc(100vh-4rem)]">
+      <div className="lg:flex">
 
-        <div className="overflow-y-auto flex flex-col">
-          {[
-            { id: 'all', label: 'All Requests', count: requests.length },
-            { id: 'pending', label: 'Open', count: requests.filter(r => r.status === 'pending').length },
-            { id: 'accepted', label: 'Accepted', count: requests.filter(r => r.status === 'accepted').length },
-            { id: 'processing', label: 'In Progress', count: requests.filter(r => r.status === 'processing').length },
-            { id: 'completed', label: 'Resolved', count: requests.filter(r => r.status === 'completed').length },
-          ].map((filter) => (
-            <button
-              key={filter.id}
-              onClick={() => setFilterStatus(filter.id)}
-              className={`w-full text-left px-4 md:px-5 py-3 md:py-3.5 flex items-center justify-between transition-all text-sm ${
-                filterStatus === filter.id
-                  ? 'bg-[#2c4569] text-white font-bold'
-                  : 'text-gray-700 hover:bg-white font-medium'
-              }`}
-            >
-              <span>{filter.label}</span>
-              <span className={`text-xs font-bold px-2 py-0.5 rounded-md ${
-                filterStatus === filter.id ? 'bg-white/25 text-white' : 'bg-gray-300 text-gray-700'
-              }`}>
-                {filter.count}
-              </span>
-            </button>
-          ))}
-        </div>
-      </div>
-
-      {/* ── MAIN CONTENT AREA ── */}
-      <div className="flex-1 overflow-y-auto">
-        <div className="max-w-[1100px] mx-auto p-3 sm:p-4 md:p-6 lg:p-12">
-          {/* Header Section */}
-          <div className="mb-6 md:mb-8">
-            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 md:gap-6">
-              <div className="flex-1">
-                <h1 className="text-xl sm:text-2xl md:text-3xl lg:text-4xl font-bold text-[#1a3a6b] mb-1 md:mb-2">My Requests</h1>
-                <p className="text-xs sm:text-sm md:text-base text-gray-600">
-                  {user?.name || 'Mylapore Resident'} — <strong>{requests.length}</strong> grievance{requests.length !== 1 ? 's' : ''} filed
-                </p>
-              </div>
-              <button
-                onClick={() => navigate('/grievance')}
-                className="bg-[#1a3a6b] hover:bg-[#122d55] text-white px-4 sm:px-6 py-2.5 md:py-3 rounded-lg md:rounded-xl font-bold text-xs sm:text-sm md:text-base flex items-center gap-2 transition-colors shadow-sm whitespace-nowrap"
-              >
-                <Plus className="w-3 sm:w-4 h-3 sm:h-4" /> New Request
-              </button>
+        {/* ── Desktop sidebar ── */}
+        <aside className="hidden lg:flex w-[240px] shrink-0 border-r border-hairline bg-surface">
+          <nav className="flex flex-col py-4 px-2 gap-0.5 w-full" aria-label="Filter">
+            <div className="px-3 py-2 text-[11px] font-semibold tracking-wide text-ink-500 uppercase">
+              Filter
             </div>
-          </div>
-
-          {/* Status Tabs (Mobile) */}
-          <div className="lg:hidden mb-4 md:mb-6 flex gap-2 overflow-x-auto pb-2">
-            {[
-              { id: 'all', label: 'All' },
-              { id: 'pending', label: 'Open' },
-              { id: 'completed', label: 'Resolved' },
-            ].map((filter) => (
+            {FILTERS.map(f => (
               <button
-                key={filter.id}
-                onClick={() => setFilterStatus(filter.id)}
-                className={`px-3 sm:px-4 py-1.5 md:py-2 rounded-lg text-xs sm:text-sm font-semibold whitespace-nowrap transition-all ${
-                  filterStatus === filter.id
-                    ? 'bg-[#1a3a6b] text-white'
-                    : 'bg-white text-gray-600 border border-gray-200'
-                }`}
+                key={f.id}
+                type="button"
+                onClick={() => setFilter(f.id)}
+                className={cn(
+                  'flex items-center gap-3 px-3 h-9 rounded-md w-full text-left text-[14px] font-medium transition-colors',
+                  'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-red focus-visible:ring-offset-2',
+                  filter === f.id
+                    ? 'text-ink-900 bg-surface-2 relative before:absolute before:left-0 before:top-1.5 before:bottom-1.5 before:w-[2px] before:bg-brand-red before:rounded-r'
+                    : 'text-ink-700 hover:bg-surface-2 hover:text-ink-900',
+                )}
               >
-                {filter.label}
+                <span className="truncate">{f.label}</span>
+                <span className="ml-auto text-[12px] font-semibold text-ink-500">
+                  {counts[f.id] ?? 0}
+                </span>
               </button>
             ))}
-          </div>
+          </nav>
+        </aside>
 
-          {/* Content Section */}
-          {loading ? (
-            <div className="text-center py-12 md:py-20">
-              <div className="animate-spin w-6 md:w-8 h-6 md:h-8 border-2 border-[#1a3a6b] border-t-transparent rounded-full mx-auto mb-2 md:mb-3" />
-              <p className="text-xs md:text-base text-gray-500">Loading grievances...</p>
-            </div>
-          ) : filteredRequests.length === 0 ? (
-            <div className="bg-white rounded-xl md:rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
-              <div className="bg-gradient-to-r from-[#1a3a6b] to-[#2b4162] px-6 md:px-8 py-4 md:py-5">
-                <h3 className="text-white font-bold text-base md:text-lg">
-                  {filterStatus === 'all' ? 'No Grievances Filed' : `No ${filterStatus.charAt(0).toUpperCase() + filterStatus.slice(1)} Grievances`}
-                </h3>
-              </div>
-              <div className="p-8 md:p-12 text-center">
-                <div className="w-16 md:w-20 h-16 md:h-20 mx-auto mb-4 md:mb-6 rounded-full bg-gray-100 flex items-center justify-center">
-                  <MessageSquare className="w-8 md:w-10 h-8 md:h-10 text-gray-400" />
-                </div>
-                <h4 className="text-lg md:text-xl font-bold text-gray-800 mb-2 md:mb-3">
-                  {filterStatus === 'all' ? 'No Grievances Registered' : 'No Grievances in This Category'}
-                </h4>
-                <p className="text-sm md:text-base text-gray-600 mb-6 md:mb-8 max-w-md mx-auto leading-relaxed">
-                  {filterStatus === 'all' 
-                    ? 'You have not filed any grievances yet. Submit your first grievance to get started with the resolution process.'
-                    : `There are currently no grievances with "${filterStatus}" status. Try selecting a different filter or file a new grievance.`
-                  }
-                </p>
-                {filterStatus === 'all' && (
-                  <button
-                    onClick={() => navigate('/grievance')}
-                    className="bg-[#1a3a6b] hover:bg-[#122d55] text-white px-6 md:px-8 py-3 md:py-3.5 rounded-lg md:rounded-xl font-bold text-sm md:text-base transition-colors shadow-sm inline-flex items-center gap-2"
-                  >
-                    <Plus className="w-4 md:w-5 h-4 md:h-5" />
-                    File Your First Grievance
-                  </button>
-                )}
-                {filterStatus !== 'all' && (
-                  <button
-                    onClick={() => setFilterStatus('all')}
-                    className="bg-gray-100 hover:bg-gray-200 text-gray-700 px-6 md:px-8 py-3 md:py-3.5 rounded-lg md:rounded-xl font-bold text-sm md:text-base transition-colors inline-flex items-center gap-2"
-                  >
-                    <Filter className="w-4 md:w-5 h-4 md:h-5" />
-                    View All Grievances
-                  </button>
-                )}
-              </div>
-              <div className="bg-blue-50 border-t border-blue-100 px-6 md:px-8 py-4 md:py-5">
-                <div className="flex items-start gap-3">
-                  <Info className="w-5 h-5 text-blue-600 shrink-0 mt-0.5" />
-                  <div>
-                    <p className="text-xs md:text-sm text-blue-900 font-semibold mb-1">Information</p>
-                    <p className="text-xs md:text-sm text-blue-800 leading-relaxed">
-                      All grievances are tracked and monitored by the MLA office. You will receive updates via SMS and email at each stage of the resolution process.
-                    </p>
-                  </div>
-                </div>
-              </div>
-            </div>
-          ) : (
-            <div className="space-y-3 md:space-y-4">
-              {filteredRequests.map((g) => {
-                const status = STATUS_LABELS[g.status] || STATUS_LABELS.pending
-                const isClosed = g.status === 'completed' || g.status === 'rejected'
-                return (
-                  <div key={g._id || g.ticketId} className="bg-white rounded-lg md:rounded-2xl border border-gray-200 p-4 md:p-6 shadow-[0_2px_8px_rgba(0,0,0,0.02)] hover:shadow-[0_4px_12px_rgba(0,0,0,0.05)] transition-all">
-                    <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3 mb-3 md:mb-4">
-                      <div className="flex-1 min-w-0">
-                        <div className="flex flex-wrap items-center gap-2 mb-2">
-                          <span className="text-xs sm:text-sm font-bold text-[#1a3a6b]">#{g.ticketId}</span>
-                          <span className={`inline-flex items-center px-2 md:px-3 py-0.5 md:py-1 rounded-lg text-xs font-semibold ${status.cls} flex-shrink-0`}>
-                            {status.label}
-                          </span>
-                        </div>
-                        <h3 className="text-sm md:text-[15px] font-bold text-gray-900 break-words">{g.optionTitle || g.optionId}</h3>
-                      </div>
-                    </div>
+        {/* ── Main content ── */}
+        <div className="flex-1 min-w-0">
+          <div className="max-w-[1100px] mx-auto px-4 lg:px-8 py-6 lg:py-10">
 
-                    <div className="mb-3 md:mb-4">
-                      <span className="inline-block bg-[#1a3a6b]/10 text-[#1a3a6b] text-xs font-bold px-2 md:px-3 py-1 md:py-1.5 rounded-lg">
-                        {g.serviceTitle || g.serviceId}
-                      </span>
-                    </div>
-
-                    {g.location && (
-                      <div className="flex items-start gap-2 text-xs md:text-sm text-gray-600 mb-2 md:mb-3 break-words">
-                        <MapPin className="w-3 md:w-4 h-3 md:h-4 flex-shrink-0 mt-0.5" />
-                        <span>{g.location}</span>
-                      </div>
-                    )}
-
-                    {g.description && (
-                      <p className="text-xs md:text-sm text-gray-700 bg-gray-50 rounded-lg p-2 md:p-3 mb-3 md:mb-4 border border-gray-100 break-words">
-                        {g.description.substring(0, 200)}{g.description.length > 200 ? '...' : ''}
-                      </p>
-                    )}
-
-                    {g.notes && (
-                      <div className="bg-green-50 border border-green-200 rounded-lg p-3 md:p-4 mb-3 md:mb-4">
-                        <div className="flex items-start gap-2 text-xs md:text-sm font-bold text-green-800 mb-1 md:mb-2">
-                          <CheckCircle2 className="w-3 md:w-4 h-3 md:h-4 flex-shrink-0 mt-0.5" />
-                          <span>MLA Team Response:</span>
-                        </div>
-                        <p className="text-xs md:text-sm text-green-800 break-words">{g.notes}</p>
-                        {g.updatedAt && (
-                          <p className="text-xs text-green-700 mt-1 md:mt-2">Updated: {formatDate(g.updatedAt)}</p>
-                        )}
-                      </div>
-                    )}
-
-                    <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 text-xs text-gray-500 mb-3 md:mb-4 pb-3 md:pb-4 border-b border-gray-100">
-                      <span className="flex items-center gap-1 flex-shrink-0">
-                        <Clock className="w-3 md:w-4 h-3 md:h-4 flex-shrink-0" />
-                        {formatDate(g.createdAt)}
-                      </span>
-                      <span className={`font-semibold px-2 md:px-2.5 py-0.5 md:py-1 rounded-full text-xs flex-shrink-0 ${isClosed ? 'bg-green-100 text-green-700' : 'bg-orange-100 text-orange-700'}`}>
-                        {isClosed ? 'Action Taken' : 'Awaiting Review'}
-                      </span>
-                    </div>
-
-                    {/* Progress Bar */}
-                    <div>
-                      <div className="h-1.5 md:h-2 bg-gray-200 rounded-full overflow-hidden mb-1.5 md:mb-2">
-                        <div className={`h-full rounded-full transition-all duration-700 ${status.bar}`} style={{ width: status.pct }} />
-                      </div>
-                      <div className="flex justify-between text-[9px] md:text-[10px] text-gray-400 gap-0.5">
-                        <span>Received</span><span>Review</span><span>Action</span><span>Resolved</span>
-                      </div>
-                    </div>
-                  </div>
-                )
-              })}
-            </div>
-          )}
-        </div>
-      </div>
-
-      {/* ── RIGHT SIDEBAR (Citizen Profile + Help) ── */}
-      <div className="hidden 2xl:flex flex-col w-[280px] shrink-0 bg-[#f0f2f5] overflow-y-auto">
-        <div className="p-6">
-          {/* Citizen Profile Card */}
-          <div className="bg-gradient-to-br from-[#1a3a6b] to-[#2b4162] rounded-2xl p-6 text-white mb-6 shadow-sm">
-            <div className="flex items-center gap-3 mb-5">
-              <div className="w-12 h-12 rounded-full bg-white/20 flex items-center justify-center">
-                <User className="w-6 h-6" />
-              </div>
+            {/* Header */}
+            <div className="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-4 mb-6">
               <div>
-                <h3 className="font-bold text-base">{user?.name || 'Citizen'}</h3>
-                <p className="text-[10px] text-white/70 uppercase tracking-widest">Verified Resident</p>
+                <h1 className="text-[24px] lg:text-[28px] font-bold tracking-[-0.015em] text-ink-900">
+                  My Requests
+                </h1>
+                <p className="mt-1 text-[14px] text-ink-500">
+                  {user?.name || 'Mylapore resident'} · {requests.length} grievance{requests.length === 1 ? '' : 's'}
+                </p>
               </div>
+              <Button
+                kind="primary"
+                size="md"
+                iconLeft={<Plus className="w-4 h-4" />}
+                onClick={() => navigate('/grievance')}
+              >
+                New request
+              </Button>
             </div>
 
-            <div className="space-y-3">
-              <div className="bg-white/10 rounded-lg p-3 flex justify-between items-center border border-white/20">
-                <span className="text-xs font-semibold text-white/80">Total Filed</span>
-                <span className="text-sm font-bold text-white">{requests.length}</span>
-              </div>
-              <div className="bg-white/10 rounded-lg p-3 flex justify-between items-center border border-white/20">
-                <span className="text-xs font-semibold text-white/80">Resolved</span>
-                <span className="text-sm font-bold text-white">{resolvedCount}</span>
-              </div>
-              <div className="bg-white/10 rounded-lg p-3 flex justify-between items-center border border-white/20">
-                <span className="text-xs font-semibold text-white/80">Pending</span>
-                <span className="text-sm font-bold text-white">{pendingCount}</span>
-              </div>
+            {/* Mobile filter pill row */}
+            <div
+              role="tablist"
+              aria-label="Filter"
+              className="lg:hidden -mx-4 px-4 mb-5 flex gap-2 overflow-x-auto pb-1"
+            >
+              {FILTERS.map(f => (
+                <button
+                  key={f.id}
+                  type="button"
+                  role="tab"
+                  aria-selected={filter === f.id}
+                  onClick={() => setFilter(f.id)}
+                  className={cn(
+                    'inline-flex items-center gap-1.5 h-9 px-3 rounded-full text-[13px] font-medium whitespace-nowrap transition-colors',
+                    'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-red focus-visible:ring-offset-2',
+                    filter === f.id
+                      ? 'bg-ink-900 text-white border border-ink-900'
+                      : 'bg-surface text-ink-700 border border-hairline hover:bg-surface-2',
+                  )}
+                >
+                  {f.label}
+                  <span className={cn(
+                    'text-[11px] font-semibold rounded-sm px-1.5 py-0.5 -mr-1',
+                    filter === f.id ? 'bg-white/15 text-white' : 'bg-surface-2 text-ink-500',
+                  )}>
+                    {counts[f.id] ?? 0}
+                  </span>
+                </button>
+              ))}
             </div>
-          </div>
 
-          {/* Help & Support Card */}
-          <div className="bg-white rounded-2xl border border-gray-200 p-6 shadow-sm">
-            <div className="flex items-center gap-3 mb-4">
-              <div className="w-10 h-10 rounded-xl bg-blue-50 flex items-center justify-center">
-                <ShieldAlert className="w-5 h-5 text-blue-600" />
-              </div>
-              <h3 className="font-bold text-[#1a3a6b]">Need Help?</h3>
-            </div>
-
-            <p className="text-sm text-gray-600 mb-4 leading-relaxed">
-              Grievances pending for more than 7 days are automatically escalated to the MLA's direct monitoring desk.
-            </p>
-
-            <div className="bg-blue-50 rounded-lg p-4 border border-blue-100">
-              <div className="flex items-start gap-2">
-                <PhoneCall className="w-4 h-4 text-[#1a3a6b] mt-0.5 shrink-0" />
-                <div>
-                  <p className="text-xs font-bold text-[#1a3a6b]">Helpline Support</p>
-                  <p className="text-[10px] text-gray-700">Available 9 AM - 6 PM</p>
+            {/* Action strip — show only if there are real signals */}
+            {(grouped.awaiting.length > 0 || grouped.active.length > 0) && filter !== 'closed' && (
+              <Card className="p-4 lg:p-5 mb-6">
+                <div className="flex items-center gap-2 mb-3">
+                  <Activity className="w-4 h-4 text-brand-red" aria-hidden="true" />
+                  <span className="text-[12px] font-semibold tracking-wide text-ink-700 uppercase">
+                    What needs attention
+                  </span>
                 </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-[14px]">
+                  {grouped.awaiting.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => setFilter('open')}
+                      className="text-left rounded-md px-3 py-2 -mx-3 -my-2 hover:bg-surface-2 transition-colors"
+                    >
+                      <span className="text-ink-900 font-semibold">Awaiting review</span>{' '}
+                      <span className="text-ink-500">({grouped.awaiting.length} older than 3 days)</span>
+                    </button>
+                  )}
+                  {grouped.active.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => setFilter('active')}
+                      className="text-left rounded-md px-3 py-2 -mx-3 -my-2 hover:bg-surface-2 transition-colors"
+                    >
+                      <span className="text-ink-900 font-semibold">In progress</span>{' '}
+                      <span className="text-ink-500">({grouped.active.length})</span>
+                    </button>
+                  )}
+                </div>
+              </Card>
+            )}
+
+            {/* Refresh meta */}
+            {!loading && requests.length > 0 && (
+              <div className="flex items-center justify-between text-[12px] text-ink-500 mb-3">
+                <span>
+                  {lastFetched
+                    ? `Checked ${relTime(lastFetched)}`
+                    : 'Live updates every 30 seconds'}
+                </span>
+                <button
+                  type="button"
+                  onClick={refresh}
+                  className="inline-flex items-center gap-1 rounded-md px-2 py-1 hover:bg-surface-2 hover:text-ink-900 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-red focus-visible:ring-offset-2"
+                >
+                  <RefreshCw className="w-3 h-3" aria-hidden="true" />
+                  Refresh
+                </button>
               </div>
-            </div>
+            )}
+
+            {/* Content */}
+            {loading ? (
+              <LoadingState />
+            ) : filtered.length === 0 ? (
+              <EmptyState
+                icon={<MessageSquare className="w-7 h-7" />}
+                title={
+                  filter === 'all'
+                    ? 'Start with your first complaint'
+                    : `No ${filter} requests`
+                }
+                body={
+                  filter === 'all'
+                    ? 'Most Mylapore residents start with Streetlight or Garbage. Filing takes about a minute and a half.'
+                    : 'Try a different filter, or file a new request.'
+                }
+                action={
+                  filter === 'all' ? (
+                    <Button
+                      kind="primary"
+                      size="md"
+                      iconLeft={<Plus className="w-4 h-4" />}
+                      onClick={() => navigate('/grievance')}
+                    >
+                      File a grievance
+                    </Button>
+                  ) : (
+                    <Button kind="secondary" size="md" onClick={() => setFilter('all')}>
+                      View all
+                    </Button>
+                  )
+                }
+              />
+            ) : (
+              <>
+                {/* Active list */}
+                <ul className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+                  {filtered
+                    .filter(g => filter === 'closed' || bucket(g.status) !== 'closed')
+                    .map(g => (
+                      <li key={g._id || g.ticketId}>
+                        <GrievanceCard g={g} />
+                      </li>
+                    ))}
+                </ul>
+
+                {/* Closed group (only when looking at all/open/active) */}
+                {filter !== 'closed' && grouped.closed.length > 0 && (
+                  <div className="mt-10">
+                    <button
+                      type="button"
+                      onClick={() => setShowClosed(v => !v)}
+                      aria-expanded={showClosed}
+                      className="w-full flex items-center justify-between gap-2 px-4 py-3 rounded-md border border-hairline hover:bg-surface-2 transition-colors text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-red focus-visible:ring-offset-2"
+                    >
+                      <span className="text-[14px] font-semibold text-ink-900">
+                        Closed ({grouped.closed.length})
+                      </span>
+                      <ChevronDown
+                        className={cn('w-4 h-4 text-ink-500 transition-transform', showClosed && 'rotate-180')}
+                        aria-hidden="true"
+                      />
+                    </button>
+
+                    {showClosed && (
+                      <ul className="mt-3 grid grid-cols-1 lg:grid-cols-2 gap-3">
+                        {grouped.closed.map(g => (
+                          <li key={g._id || g.ticketId}>
+                            <GrievanceCard g={g} />
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                )}
+              </>
+            )}
           </div>
         </div>
       </div>
     </div>
+  )
+}
+
+/* ──────────────────────────── sub-components ──────────────────────────── */
+
+function GrievanceCard({ g }) {
+  const isClosed = g.status === 'completed' || g.status === 'rejected'
+  return (
+    <Card interactive className="p-4 lg:p-5 h-full flex flex-col">
+      {/* Top row */}
+      <header className="flex items-center justify-between gap-3 mb-2">
+        <StatusChip status={g.status} />
+        <span className="font-mono text-[11px] text-ink-500 truncate" title={g.ticketId}>
+          #{g.ticketId}
+        </span>
+      </header>
+
+      {/* Title */}
+      <h3 className="text-[16px] font-semibold text-ink-900 leading-snug">
+        {g.optionTitle || g.optionId || 'Grievance'}
+      </h3>
+
+      {/* Category line */}
+      {(g.serviceTitle || g.serviceId) && (
+        <p className="mt-1 text-[12px] text-ink-500">
+          {g.serviceTitle || g.serviceId}
+        </p>
+      )}
+
+      {/* Description */}
+      {g.description && (
+        <p className="mt-2 text-[14px] text-ink-700 leading-relaxed line-clamp-2">
+          {g.description}
+        </p>
+      )}
+
+      {/* Location */}
+      {g.location && (
+        <p className="mt-2 inline-flex items-start gap-1.5 text-[13px] text-ink-500">
+          <MapPin className="w-3.5 h-3.5 mt-0.5 shrink-0" aria-hidden="true" />
+          <span className="line-clamp-1">{g.location}</span>
+        </p>
+      )}
+
+      {/* What's next */}
+      <p className="mt-3 inline-flex items-start gap-1.5 text-[13px] text-ink-700">
+        <Activity className="w-3.5 h-3.5 mt-0.5 text-ink-500 shrink-0" aria-hidden="true" />
+        <span>{whatsNext(g)}</span>
+      </p>
+
+      {/* MLA note (if any) */}
+      {g.notes && (
+        <div className="mt-3 rounded-md bg-surface-2 border border-hairline px-3 py-2">
+          <div className="text-[11px] font-semibold text-ink-500 uppercase tracking-wide mb-1 flex items-center gap-1.5">
+            <CheckCircle2 className="w-3 h-3" aria-hidden="true" />
+            MLA office note
+          </div>
+          <p className="text-[13px] text-ink-700 leading-relaxed">{g.notes}</p>
+        </div>
+      )}
+
+      {/* Footer */}
+      <footer className="mt-auto pt-4 flex items-center justify-between text-[12px] text-ink-500">
+        <span className="inline-flex items-center gap-1" title={g.updatedAt || g.createdAt}>
+          <Clock className="w-3 h-3" aria-hidden="true" />
+          {isClosed
+            ? `Closed ${formatDate(g.updatedAt || g.createdAt)}`
+            : `Updated ${relTime(g.updatedAt || g.createdAt)}`}
+        </span>
+      </footer>
+    </Card>
+  )
+}
+
+function LoadingState() {
+  return (
+    <ul className="grid grid-cols-1 lg:grid-cols-2 gap-3" aria-busy="true" aria-live="polite">
+      {[0, 1, 2, 3].map(i => (
+        <li key={i}>
+          <Card className="p-5">
+            <div className="h-5 w-20 bg-surface-2 rounded mb-3 animate-pulse" />
+            <div className="h-5 w-3/4 bg-surface-2 rounded mb-2 animate-pulse" />
+            <div className="h-4 w-1/2 bg-surface-2 rounded mb-3 animate-pulse" />
+            <div className="h-4 w-full bg-surface-2 rounded animate-pulse" />
+          </Card>
+        </li>
+      ))}
+    </ul>
   )
 }
